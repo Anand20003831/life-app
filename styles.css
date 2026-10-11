@@ -70,3 +70,4 @@ code { font-family: ui-monospace, monospace; font-size: .9em; }
 a { color: var(--accent); }
 .sync { width: 10px; height: 10px; border-radius: 50%; background: var(--line); }
 .sync.ok { background: var(--good); } .sync.syncing { background: var(--accent); } .sync.error { background: var(--bad); }
+.timeline li.plan { border-color: var(--good); } .timeline li.plan.gym { border-color: #a35dd8; }

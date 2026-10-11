@@ -84,8 +84,12 @@ const TOOLS = [
     parameters: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } },
   { name: 'add_todo', description: 'Add a personal to-do.',
     parameters: { type: 'object', properties: { title: { type: 'string' }, due: { type: 'string', description: 'ISO 8601, optional' } }, required: ['title'] } },
-  { name: 'complete_todo', description: 'Mark a personal to-do done.',
+  { name: 'complete_todo', description: 'Mark a personal to-do OR a planner checkpoint (id starts with cp-) done. Ids are in the context.',
     parameters: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } },
+  { name: 'skip_event', description: "Record that they are NOT going to a family/personal calendar event, so the planner can use that time. Nothing is sent to anyone. Use the event_id from the context; whole_series for a repeating event.",
+    parameters: { type: 'object', properties: { event_id: { type: 'string' }, whole_series: { type: 'boolean' } }, required: ['event_id'] } },
+  { name: 'replan', description: 'Ask the planner to re-plan the week now (e.g. after a big change). Takes a few minutes.',
+    parameters: { type: 'object', properties: {} } },
   { name: 'propose_clickup_update', description: "Propose a change to the TEAM's ClickUp board (due date, status, name, or a comment). It is NOT applied until the user taps Confirm. Use the task id from the context.",
     parameters: { type: 'object', properties: {
       task_id: { type: 'string' }, task_name: { type: 'string' }, due: { type: 'string', description: 'new ISO 8601 due date' },
@@ -135,8 +139,16 @@ async function runTool(name, a, ctx) {
       return { added: item };
     }
     case 'complete_todo':
-      await gh.update('schedule/todos.json', (list) => list.map((t) => (t.id === a.id ? { ...t, done: true } : t)), [], 'app: todo done');
+      await markDone(a.id);
       return { done: a.id };
+    case 'skip_event': {
+      const id = a.whole_series ? a.event_id.split('_')[0] : a.event_id;
+      await gh.update('schedule/skipped.json', (list) => (list.includes(id) ? list : [...list, id]), [], 'app: not going');
+      return { skipped: id, note: 'The planner will treat that time as free from its next run.' };
+    }
+    case 'replan':
+      await gh.dispatch('pulse.yml', { plan_now: 'true' });
+      return { started: true, note: 'The new plan lands in the app and the Life calendar in a few minutes.' };
     case 'propose_clickup_update': {
       const out = [];
       if (a.due || a.status) {
@@ -170,6 +182,16 @@ async function runTool(name, a, ctx) {
     }
     default:
       return { error: `unknown tool ${name}` };
+  }
+}
+
+// Checkpoints live in the planner's file, so "done" for them is a list of ids;
+// to-dos are the app's own and carry their own flag.
+export async function markDone(id) {
+  if (id.startsWith('cp-')) {
+    await gh.update('schedule/done.json', (list) => (list.includes(id) ? list : [...list, id]), [], 'app: checkpoint done');
+  } else {
+    await gh.update('schedule/todos.json', (list) => list.map((t) => (t.id === id ? { ...t, done: true } : t)), [], 'app: todo done');
   }
 }
 

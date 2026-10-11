@@ -144,9 +144,9 @@ export async function checkAccess() {
   return repo;
 }
 
-export async function dispatch(workflow) {
+export async function dispatch(workflow, inputs) {
   const res = await fetch(`${API}/repos/${cfg.owner}/${cfg.repo}/actions/workflows/${workflow}/dispatches`, {
-    method: 'POST', headers: headers(), body: JSON.stringify({ ref: 'main' }),
+    method: 'POST', headers: headers(), body: JSON.stringify({ ref: 'main', ...(inputs ? { inputs } : {}) }),
   });
   if (!res.ok) throw new Error(`Couldn't start ${workflow} (${res.status}). Does the token have Actions: write?`);
 }

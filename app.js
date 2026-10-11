@@ -132,6 +132,7 @@ function todayView() {
       ${(b.items || []).map((i) => `<li class="k-${esc(i.kind)}"><span>${KIND[i.kind] || '•'}</span>${esc(i.text)}</li>`).join('')}
       </ul>${b.focus ? `<div class="focus"><strong>Focus:</strong> ${esc(b.focus.what)}<br><span class="muted">${esc(b.focus.why || '')}</span></div>` : ''}</section>`);
   }
+  if (t.plan_summary) parts.push(`<p class="muted small">This week: ${esc(t.plan_summary)}</p>`);
   if (state.pending.length) parts.push(pendingCard());
 
   if (t.changes?.length) {
@@ -144,19 +145,27 @@ function todayView() {
     ...(t.classes || []).map((e) => ({ start: e.start, end: e.end, title: e.title, where: e.location, kind: 'class' })),
     ...(t.personal || []).filter((e) => isToday(e.start)).map((e) => ({ start: e.start, end: e.end, title: e.title, where: e.location, kind: e.source, allDay: e.all_day })),
     ...(t.overrides || []).filter((o) => isToday(o.start)).map((o) => ({ start: o.start, end: o.end, title: o.title, where: o.location, kind: 'override', note: o.note })),
+    ...(t.plan_today || []).map((b) => ({ start: b.start, end: b.end, title: b.title, kind: `plan ${b.kind}`, step: b.first_step, why: b.for })),
   ].sort((a, b) => (a.allDay ? -1 : 0) - (b.allDay ? -1 : 0) || new Date(a.start) - new Date(b.start));
   const now = Date.now();
   parts.push(`<section class="card"><h3>Today</h3>${rows.length ? `<ol class="timeline">${rows.map((r) => {
     const live = !r.allDay && new Date(r.start) <= now && now < new Date(r.end || r.start);
     const past = !r.allDay && new Date(r.end || r.start) < now;
     return `<li class="${r.kind}${live ? ' live' : ''}${past ? ' past' : ''}"><time>${r.allDay ? 'all day' : time(r.start)}</time>
-      <div><b>${esc(r.title)}</b>${r.where ? `<span class="muted"> · ${esc(r.where)}</span>` : ''}${r.note ? `<br><span class="tag">changed: ${esc(r.note)}</span>` : ''}</div></li>`;
+      <div><b>${r.kind.startsWith('plan') ? '▸ ' : ''}${esc(r.title)}</b>${r.where ? `<span class="muted"> · ${esc(r.where)}</span>` : ''}${r.note ? `<br><span class="tag">changed: ${esc(r.note)}</span>` : ''}
+      ${r.step ? `<br><span class="muted small">Start with: ${esc(r.step)}</span>` : ''}</div></li>`;
   }).join('')}</ol>` : '<p class="muted">Nothing on today.</p>'}</section>`);
 
-  const tomorrow = [...(t.tomorrow || []), ...(t.personal || []).filter((e) => !isToday(e.start)),
+  const tomorrow = [...(t.tomorrow || []), ...(t.plan_tomorrow || []).map((b) => ({ ...b, title: `▸ ${b.title}` })),
+    ...(t.personal || []).filter((e) => !isToday(e.start)),
     ...(t.overrides || []).filter((o) => !isToday(o.start))].sort((a, b) => new Date(a.start) - new Date(b.start));
   if (tomorrow.length) {
     parts.push(`<section class="card"><h3>Tomorrow</h3><ul class="plain">${tomorrow.map((e) => `<li><time>${e.all_day ? 'all day' : time(e.start)}</time> ${esc(e.title)}</li>`).join('')}</ul></section>`);
+  }
+  if (t.checkpoints?.length) {
+    parts.push(`<section class="card"><h3>Checkpoints</h3><ul class="tasks">${t.checkpoints.map((cp) => `<li>
+      <div><b>${esc(cp.title)}</b><br><span class="muted">for ${esc(cp.for)} · ${dayShort(cp.due)} ${time(cp.due)} · ${until(cp.due)}</span></div>
+      <button data-action="done" data-id="${esc(cp.id)}">✓</button></li>`).join('')}</ul></section>`);
   }
   if (t.overdue?.length) parts.push(taskCard('Overdue', t.overdue, 'warn'));
   if (t.due?.length) parts.push(taskCard('Due in the next 7 days', t.due));
@@ -167,7 +176,7 @@ function todayView() {
 function taskCard(title, items, cls = '') {
   return `<section class="card ${cls}"><h3>${title}</h3><ul class="tasks">${items.map((d, i) => `<li>
     <div><b>${esc(d.title)}</b><br><span class="muted">${esc(d.module || '')} ${d.source === 'clickup' ? (d.mine === false ? '· team' : '· yours') : ''} · ${dayShort(d.due)} ${time(d.due)} · ${until(d.due)}</span></div>
-    <div class="row">${d.url ? `<a class="btn ghost" href="${esc(d.url)}" target="_blank" rel="noopener">Open</a>` : ''}
+    <div class="row">${d.source === 'todo' ? `<button data-action="done" data-id="${esc(d.id)}">✓</button>` : ''}${d.url ? `<a class="btn ghost" href="${esc(d.url)}" target="_blank" rel="noopener">Open</a>` : ''}
     <button class="ghost" data-action="delegate" data-task='${esc(JSON.stringify({ title: d.title, source: d.source, module: d.module, due: d.due, url: d.url }))}'>Delegate</button></div>
   </li>`).join('')}</ul></section>`;
 }
@@ -320,7 +329,7 @@ async function archiveChat() {
 
 // ---------------------------------------------------------------- Settings
 
-const EXPECT = { 'uni-sync': 13, 'lecture-sync': 13, 'mail-sync': 13, 'calendar-sync': 2, 'clickup-sync': 2, today: 2 };
+const EXPECT = { 'uni-sync': 13, 'lecture-sync': 13, 'mail-sync': 13, 'calendar-sync': 2, 'clickup-sync': 2, today: 2, planner: 26 };
 
 function settingsView() {
   const runs = state.data.runs || {};
@@ -345,6 +354,7 @@ function settingsView() {
     <section class="card"><h2>Run now</h2><div class="row wrap">
       <button data-action="run" data-wf="uni-sync.yml">Check Moodle, lectures + email</button>
       <button data-action="run" data-wf="pulse.yml">Refresh calendar + ClickUp + Today</button>
+      <button data-action="replan">Re-plan the week</button>
       <button class="ghost" data-action="refresh">Reload data</button></div>
       <p class="muted small">A run takes 1–5 minutes; you get a notification for anything new.</p></section>
     <section class="card"><h2>Health</h2><ul class="health">${health}</ul>
@@ -413,6 +423,16 @@ document.addEventListener('click', async (e) => {
     const body = el.closest('.body');
     const blob = new Blob([body.dataset.text || body.innerText], { type: 'text/plain' });
     Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: el.dataset.name }).click();
+  } else if (a === 'done') {
+    el.disabled = true;
+    try {
+      await ai.markDone(el.dataset.id);
+      el.closest('li').style.opacity = '0.4';
+      el.textContent = 'Done';
+    } catch (err) { alert(err.message); el.disabled = false; }
+  } else if (a === 'replan') {
+    el.disabled = true;
+    try { await gh.dispatch('pulse.yml', { plan_now: 'true' }); el.textContent = 'Re-planning… ✓'; } catch (err) { alert(err.message); el.disabled = false; }
   } else if (a === 'run') {
     el.disabled = true;
     try { await gh.dispatch(el.dataset.wf); el.textContent = 'Started ✓'; } catch (err) { alert(err.message); el.disabled = false; }

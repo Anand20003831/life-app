@@ -1,7 +1,7 @@
 // Keeps the app opening instantly with no signal. Bump CACHE when the files
 // below change; old caches are deleted on activate. Data never goes through
 // here: it comes from the GitHub API and is cached by the app itself.
-const CACHE = 'life-v4';
+const CACHE = 'life-v5';
 const SHELL = ['./', './index.html', './styles.css', './app.js', './gh.js', './ai.js', './md.js',
   './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/favicon-32.png'];
 
