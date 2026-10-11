@@ -131,6 +131,18 @@ export async function readMaybeChunked(path) {
   return parts.join('');
 }
 
+// Can this token actually see the repo? GitHub answers 404 (not 403) for a
+// private repo the token can't access, which otherwise looks like "no files yet".
+export async function checkAccess() {
+  const res = await fetch(`${API}/repos/${cfg.owner}/${cfg.repo}`, { headers: headers() });
+  if (res.status === 401) throw new Error('GitHub rejected the token (expired, revoked or mistyped). Make a new one and paste it in Settings.');
+  if (res.status === 404) throw new Error(`This token can't see "${cfg.owner}/${cfg.repo}". Check the repo name, and that the token's Repository access includes life-data.`);
+  if (!res.ok) throw new Error(`GitHub ${res.status} checking the repo`);
+  const repo = await res.json();
+  if (repo.permissions && !repo.permissions.push) throw new Error('The token can read but not write. Set Contents to "Read and write".');
+  return repo;
+}
+
 export async function dispatch(workflow) {
   const res = await fetch(`${API}/repos/${cfg.owner}/${cfg.repo}/actions/workflows/${workflow}/dispatches`, {
     method: 'POST', headers: headers(), body: JSON.stringify({ ref: 'main' }),

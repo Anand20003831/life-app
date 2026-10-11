@@ -64,6 +64,7 @@ async function refresh() {
   if (!gh.configured()) return;
   setStatus('syncing');
   try {
+    await gh.checkAccess();
     await Promise.all(Object.entries(FILES).map(async ([k, path]) => { state.data[k] = await gh.readJSON(path, null); }));
     await Promise.all([loadPending(), loadJobs()]);
     setStatus('ok');
@@ -72,6 +73,7 @@ async function refresh() {
   }
   draw();
 }
+
 
 async function loadPending() {
   const files = (await gh.list('inbox/actions')).filter((f) => f.name.endsWith('.json'));
@@ -121,6 +123,7 @@ function todayView() {
   const parts = [];
   parts.push(`<header class="day"><h1>${fmt(new Date().toISOString(), { weekday: 'long', day: 'numeric', month: 'long' })}</h1>
     ${t ? `<span class="muted">updated ${ago(t.generated)}</span>` : ''}</header>`);
+  if (statusText) parts.push(`<section class="card warn"><b>Can't load your data</b><p>${esc(statusText)}</p><button data-action="tab" data-tab="settings">Settings</button></section>`);
   if (!t) return parts.join('') + '<p class="muted">Nothing built yet. The cloud job runs hourly.</p>';
 
   const b = t.brief;
@@ -335,9 +338,9 @@ function settingsView() {
   const masked = (v) => (v ? `${esc(v.slice(0, 6))}…${esc(v.slice(-4))}` : 'not set');
   return `<section class="card"><h2>Keys (this device only)</h2>
     <form data-action="savekeys" class="stack">
-      <label>GitHub token <span class="muted">${masked(gh.cfg.token)}</span><input name="ghToken" type="password" placeholder="github_pat_…" autocomplete="off"></label>
-      <label>Gemini API key <span class="muted">${masked(gh.cfg.geminiKey)}</span><input name="geminiKey" type="password" placeholder="paste to replace" autocomplete="off"></label>
-      <label>Data repo <input name="repo" value="${gh.cfg.owner ? `${esc(gh.cfg.owner)}/${esc(gh.cfg.repo)}` : ''}" placeholder="your-username/life-data"></label>
+      <label>GitHub token <span class="muted">${masked(gh.cfg.token)}</span><input name="ghToken" type="password" placeholder="github_pat_…" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+      <label>Gemini API key <span class="muted">${masked(gh.cfg.geminiKey)}</span><input name="geminiKey" type="password" placeholder="paste to replace" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+      <label>Data repo <input name="repo" value="${gh.cfg.owner ? `${esc(gh.cfg.owner)}/${esc(gh.cfg.repo)}` : ''}" placeholder="your-username/life-data" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
       <button>Save</button></form></section>
     <section class="card"><h2>Run now</h2><div class="row wrap">
       <button data-action="run" data-wf="uni-sync.yml">Check Moodle, lectures + email</button>
