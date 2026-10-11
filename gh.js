@@ -139,6 +139,7 @@ export async function checkAccess() {
   if (res.status === 404) throw new Error(`This token can't see "${cfg.owner}/${cfg.repo}". Check the repo name, and that the token's Repository access includes life-data.`);
   if (!res.ok) throw new Error(`GitHub ${res.status} checking the repo`);
   const repo = await res.json();
+  if (!repo.private) throw new Error(`"${cfg.owner}/${cfg.repo}" is a public repo, so it isn't your data repo (that's the private one, life-data). Fix the Data repo field in Settings.`);
   if (repo.permissions && !repo.permissions.push) throw new Error('The token can read but not write. Set Contents to "Read and write".');
   return repo;
 }
