@@ -1,0 +1,72 @@
+/* Minimal on purpose: functional first, the look comes later. */
+:root { --bg: #f6f6f4; --card: #fff; --ink: #161616; --muted: #6b6b6b; --line: #e3e3df;
+        --accent: #2457d6; --warn: #b54708; --warn-bg: #fff6ed; --good: #1a7f37; --bad: #c62828; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #111; --card: #1b1b1b; --ink: #ececec; --muted: #9a9a9a; --line: #2c2c2c;
+          --accent: #7aa2ff; --warn: #ffb36b; --warn-bg: #2a1d10; --good: #5fd27a; --bad: #ff7070; }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+#top { position: sticky; top: 0; z-index: 2; display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 16px; padding-top: max(10px, env(safe-area-inset-top)); background: var(--bg); font-weight: 600; }
+main { max-width: 720px; margin: 0 auto; padding: 0 16px 96px; }
+nav { position: fixed; bottom: 0; left: 0; right: 0; display: flex; background: var(--card);
+  border-top: 1px solid var(--line); padding-bottom: env(safe-area-inset-bottom); }
+nav button { flex: 1; padding: 14px 0; border: 0; background: none; color: var(--muted); font: inherit; }
+nav button.on { color: var(--accent); font-weight: 600; }
+h1 { font-size: 1.35rem; margin: 6px 0 2px; } h2 { font-size: 1.1rem; margin: 0 0 8px; } h3 { font-size: .95rem; margin: 0 0 8px; }
+.muted { color: var(--muted); } .small { font-size: .85rem; } .err { color: var(--bad); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin: 12px 0; }
+.card.warn { background: var(--warn-bg); border-color: var(--warn); }
+.card.confirm { border-color: var(--accent); }
+.day { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.items { list-style: none; margin: 0; padding: 0; }
+.items li { display: flex; gap: 8px; padding: 4px 0; } .items li span { width: 1.2em; flex: none; }
+.items .k-change { color: var(--warn); font-weight: 600; }
+.focus { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+.timeline { list-style: none; margin: 0; padding: 0; }
+.timeline li { display: flex; gap: 12px; padding: 6px 0; border-left: 3px solid var(--line); padding-left: 10px; }
+.timeline li.live { border-color: var(--accent); } .timeline li.past { opacity: .5; }
+.timeline li.override { border-color: var(--warn); }
+.timeline time, .plain time { width: 3.6em; flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+.plain { list-style: none; margin: 0; padding: 0; } .plain li { display: flex; padding: 3px 0; }
+.tasks, .list, .health { list-style: none; margin: 0; padding: 0; }
+.tasks li { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); }
+.tasks li:first-child { border-top: 0; }
+.list li { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin: 10px 0; cursor: pointer; }
+.list li p { margin: 6px 0 0; }
+.health li { padding: 4px 0 4px 10px; border-left: 4px solid var(--bad); margin: 4px 0; }
+.health li.good { border-color: var(--good); } .health li.meh { border-color: var(--warn); }
+.row { display: flex; gap: 8px; align-items: center; } .row.wrap { flex-wrap: wrap; }
+.stack { display: flex; flex-direction: column; gap: 10px; } .stack label { display: flex; flex-direction: column; gap: 4px; }
+button, .btn { font: inherit; border: 0; border-radius: 8px; padding: 8px 12px; background: var(--accent); color: #fff;
+  cursor: pointer; text-decoration: none; white-space: nowrap; }
+button.ghost, .btn.ghost { background: none; color: var(--accent); border: 1px solid var(--line); }
+button:disabled { opacity: .5; }
+input, textarea, select { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px; width: 100%; }
+.seg { display: flex; gap: 6px; overflow-x: auto; padding: 8px 0; }
+.seg button { background: none; color: var(--muted); border: 1px solid var(--line); }
+.seg button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.tag { font-size: .8rem; padding: 1px 6px; border-radius: 6px; background: var(--warn-bg); color: var(--warn); }
+.tag.done { background: none; color: var(--good); } .tag.failed { color: var(--bad); } .tag.queued { color: var(--accent); background: none; }
+.ask { display: flex; gap: 8px; margin: 12px 0; } .ask input, .ask textarea { flex: 1; }
+.pending { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 0; flex-wrap: wrap; }
+.chat { display: flex; flex-direction: column; height: calc(100dvh - 130px); }
+.chatbar { display: flex; gap: 6px; padding: 8px 0; } .chatbar select { flex: 1; } .chatbar select#effort { flex: none; width: 6.5em; }
+#log { flex: 1; overflow-y: auto; padding: 4px 0; }
+.bubble { max-width: 88%; padding: 8px 12px; border-radius: 14px; margin: 6px 0; overflow-wrap: anywhere; }
+.bubble.user { margin-left: auto; background: var(--accent); color: #fff; }
+.bubble.model { background: var(--card); border: 1px solid var(--line); }
+.bubble p { margin: 4px 0; } .bubble.thinking { color: var(--muted); font-style: italic; }
+.chat .ask { margin: 6px 0 0; }
+.overlay { position: fixed; inset: 0; z-index: 5; background: rgba(0,0,0,.45); display: flex; align-items: flex-end; justify-content: center; }
+.sheet { position: relative; background: var(--card); width: 100%; max-width: 760px; max-height: 92dvh; overflow-y: auto;
+  border-radius: 16px 16px 0 0; padding: 18px 16px 32px; }
+.close { position: absolute; top: 10px; right: 10px; background: none; color: var(--muted); font-size: 1.1rem; }
+.md h2, .md h3 { margin-top: 18px; } .md pre, pre.file { background: var(--bg); padding: 10px; border-radius: 8px; overflow-x: auto; white-space: pre-wrap; }
+code { font-family: ui-monospace, monospace; font-size: .9em; }
+a { color: var(--accent); }
+.sync { width: 10px; height: 10px; border-radius: 50%; background: var(--line); }
+.sync.ok { background: var(--good); } .sync.syncing { background: var(--accent); } .sync.error { background: var(--bad); }
