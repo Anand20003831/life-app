@@ -277,19 +277,23 @@ async function fillModels() {
     const [all, current] = await Promise.all([ai.models(), ai.defaultModel()]);
     sel.innerHTML = all.map((m) => `<option value="${esc(m.id)}" ${m.id === current ? 'selected' : ''}>${esc(m.id)}</option>`).join('');
     sel.dataset.filled = '1';
+    if (current && !ai.settings.model) ai.settings.model = current;
   } catch (err) {
     sel.innerHTML = `<option>models unavailable</option>`;
   }
 }
 
 async function sendChat(text) {
+  // Read the choice from settings, not the <select>: draw() below rebuilds the
+  // select, and mid-rebuild its value is the "loading models…" placeholder.
+  const model = ai.settings.model || undefined;
   state.chat.shown.push({ role: 'user', text, at: new Date().toISOString() });
   state.busy = true;
   draw();
   const tools = [];
   try {
     const out = await ai.send(state.chat.history, text, {
-      model: $('#model')?.value || undefined, effort: ai.settings.effort,
+      model, effort: ai.settings.effort,
       onTool: (name) => { tools.push(name); state.busy = `using ${name}…`; draw(); },
     });
     state.chat.history = out.history;
@@ -429,7 +433,7 @@ document.addEventListener('click', async (e) => {
 });
 
 document.addEventListener('change', (e) => {
-  if (e.target.id === 'model') ai.settings.model = e.target.value;
+  if (e.target.id === 'model' && /^gemini-/.test(e.target.value)) ai.settings.model = e.target.value;
   if (e.target.id === 'effort') ai.settings.effort = e.target.value;
 });
 
@@ -464,7 +468,7 @@ document.addEventListener('submit', async (e) => {
         attachments.push(await gh.upload(`inbox/files/${jobId}`, file, (m) => { progress.textContent = m; }));
       }
       progress.textContent = 'Starting…';
-      await ai.queueDelegate({ id: jobId, ...task, instruction: data.instruction, model: data.model || undefined,
+      await ai.queueDelegate({ id: jobId, ...task, instruction: data.instruction, model: /^gemini-/.test(data.model || '') ? data.model : undefined,
                                effort: data.effort, attachments });
       form.closest('.overlay').remove();
       state.tab = 'uni'; state.uniTab = 'jobs';

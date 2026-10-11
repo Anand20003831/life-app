@@ -223,7 +223,8 @@ ${now || '(the shared memory has not been built yet)'}`;
 // history: [{role:'user'|'model', parts:[...]}] in Gemini's own shape, kept intact
 // (Gemini 3 needs its thought signatures handed back unchanged).
 export async function send(history, text, { model, effort, onTool } = {}) {
-  model = model || await defaultModel();
+  const usable = (await models()).map((m) => m.id);
+  if (!usable.includes(model)) model = await defaultModel(); // never send a placeholder or retired name
   const ctx = { proposed: [], model, effort };
   const contents = [...history, { role: 'user', parts: [{ text }] }];
   const body = () => ({
