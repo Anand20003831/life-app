@@ -55,6 +55,13 @@ export async function defaultModel() {
   return all.find((m) => m.id === settings.model)?.id || all.find((m) => /-flash$/.test(m.id))?.id || all[0]?.id;
 }
 
+function fallbackAfter(model, usable) {
+  const family = usable.filter((id) => /^gemini-\d+(\.\d+)?-flash(-lite)?$/.test(id));
+  const tried = fallbackAfter.tried || (fallbackAfter.tried = new Set());
+  tried.add(model);
+  return family.find((id) => !tried.has(id)) || null;
+}
+
 function thinking(model, effort) {
   const v = parseInt((model.match(/gemini-(\d+)/) || [0, 0])[1], 10);
   if (v >= 3) return { thinkingLevel: effort };
@@ -245,6 +252,7 @@ ${now || '(the shared memory has not been built yet)'}`;
 // history: [{role:'user'|'model', parts:[...]}] in Gemini's own shape, kept intact
 // (Gemini 3 needs its thought signatures handed back unchanged).
 export async function send(history, text, { model, effort, onTool } = {}) {
+  fallbackAfter.tried = new Set();
   const usable = (await models()).map((m) => m.id);
   if (!usable.includes(model)) model = await defaultModel(); // never send a placeholder or retired name
   const ctx = { proposed: [], model, effort };
@@ -258,12 +266,22 @@ export async function send(history, text, { model, effort, onTool } = {}) {
   const sys = await systemText();
   for (let step = 0; step < 6; step++) {
     let out;
-    try {
-      out = await call(`models/${model}:generateContent`, body());
-    } catch (err) {
-      if (err.status === 400 && /thinking/i.test(err.message)) {
-        out = await call(`models/${model}:generateContent`, { ...body(), generationConfig: { temperature: 0.4 } });
-      } else throw err;
+    for (;;) {
+      try {
+        out = await call(`models/${model}:generateContent`, body());
+        break;
+      } catch (err) {
+        if (err.status === 400 && /thinking/i.test(err.message)) {
+          out = await call(`models/${model}:generateContent`, { ...body(), generationConfig: { temperature: 0.4 } });
+          break;
+        }
+        // Each model has its own free daily quota: on 429 move to the next Flash/Lite model.
+        const next = err.status === 429 && fallbackAfter(model, usable);
+        if (!next) throw err;
+        onTool?.(`switching to ${next} (quota)`);
+        model = next;
+        ctx.model = model;
+      }
     }
     const msg = out.candidates?.[0]?.content;
     if (!msg) throw new Error('Gemini returned nothing (it may have been blocked).');
