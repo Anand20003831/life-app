@@ -1,6 +1,6 @@
 // Life: the organiser's app. Plain modules, no build step; GitHub Pages serves
 // this folder as-is. All data lives in the private life-data repo (gh.js); the
-// chat and delegated jobs use Gemini (ai.js). Functional first, styling later.
+// chat and delegated jobs use Gemini (ai.js).
 
 import * as gh from './gh.js';
 import * as ai from './ai.js';
@@ -46,6 +46,29 @@ function ago(iso) {
 }
 
 const KIND = { change: '⚠', focus: '◎', heads_up: '•', people: '♥', admin: '✎' };
+
+// ---------------------------------------------------------------- modules: one colour each
+
+const norm = (s) => (s || '').toLowerCase().replace(/&amp;|&/g, 'and').replace(/[^a-z0-9]+/g, ' ').trim();
+
+// The module code for an event or item: its own field, or a timetable title
+// ("Operating Systems AND Concurrency - Lecture") matched to a course name.
+function moduleOf(e) {
+  if (e.module) return e.module;
+  const title = norm((e.title || '').split(' - ')[0]);
+  if (!title) return null;
+  const hit = (state.data.courses || []).find((c) => norm(c.name.replace(/\s*\(.*$/, '')) === title);
+  return hit ? hit.code : null;
+}
+
+function modIndex(code) {
+  const codes = (state.data.courses || []).map((c) => c.code).sort();
+  const i = codes.indexOf(code);
+  return (i < 0 ? [...code].reduce((a, ch) => a + ch.charCodeAt(0), 0) : i) % 6;
+}
+
+const chip = (code) => (code ? `<span class="chip m${modIndex(code)}">${esc(code.replace(/^COMP/, ''))}</span>` : '');
+const rail = (code) => (code ? ` m${modIndex(code)}` : '');
 
 // ---------------------------------------------------------------- data
 
@@ -99,7 +122,7 @@ function setStatus(kind, detail = '') {
 // ---------------------------------------------------------------- shell
 
 function draw() {
-  document.querySelectorAll('nav button').forEach((b) => b.classList.toggle('on', b.dataset.tab === state.tab));
+  document.querySelectorAll('nav.tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === state.tab));
   if (!gh.configured() && state.tab !== 'settings') { main.innerHTML = setupView(); return; }
   const view = { today: todayView, uni: uniView, mail: mailView, chat: chatView, settings: settingsView }[state.tab];
   main.innerHTML = view();
@@ -142,7 +165,7 @@ function todayView() {
   const today = londonDate();
   const isToday = (iso) => iso && londonDate(new Date(iso)) === today;
   const rows = [
-    ...(t.classes || []).map((e) => ({ start: e.start, end: e.end, title: e.title, where: e.location, kind: 'class' })),
+    ...(t.classes || []).map((e) => ({ start: e.start, end: e.end, title: e.title, where: e.location, kind: 'class', mod: moduleOf(e) })),
     ...(t.personal || []).filter((e) => isToday(e.start)).map((e) => ({ start: e.start, end: e.end, title: e.title, where: e.location, kind: e.source, allDay: e.all_day })),
     ...(t.overrides || []).filter((o) => isToday(o.start)).map((o) => ({ start: o.start, end: o.end, title: o.title, where: o.location, kind: 'override', note: o.note })),
     ...(t.plan_today || []).map((b) => ({ start: b.start, end: b.end, title: b.title, kind: `plan ${b.kind}`, step: b.first_step, why: b.for })),
@@ -151,16 +174,17 @@ function todayView() {
   parts.push(`<section class="card"><h3>Today</h3>${rows.length ? `<ol class="timeline">${rows.map((r) => {
     const live = !r.allDay && new Date(r.start) <= now && now < new Date(r.end || r.start);
     const past = !r.allDay && new Date(r.end || r.start) < now;
-    return `<li class="${r.kind}${live ? ' live' : ''}${past ? ' past' : ''}"><time>${r.allDay ? 'all day' : time(r.start)}</time>
-      <div><b>${r.kind.startsWith('plan') ? '▸ ' : ''}${esc(r.title)}</b>${r.where ? `<span class="muted"> · ${esc(r.where)}</span>` : ''}${r.note ? `<br><span class="tag">changed: ${esc(r.note)}</span>` : ''}
-      ${r.step ? `<br><span class="muted small">Start with: ${esc(r.step)}</span>` : ''}</div></li>`;
+    return `<li class="${r.kind}${rail(r.mod)}${live ? ' live' : ''}${past ? ' past' : ''}"><time>${r.allDay ? 'all day' : time(r.start)}</time>
+      <div><b>${r.kind.startsWith('plan') ? '▸ ' : ''}${esc(r.title)}</b> ${chip(r.mod)}${live ? ' <span class="now">now</span>' : ''}
+      ${r.where ? `<div class="muted small">${esc(r.where)}</div>` : ''}${r.note ? `<span class="tag">changed: ${esc(r.note)}</span>` : ''}
+      ${r.step ? `<div class="muted small">Start with: ${esc(r.step)}</div>` : ''}</div></li>`;
   }).join('')}</ol>` : '<p class="muted">Nothing on today.</p>'}</section>`);
 
   const tomorrow = [...(t.tomorrow || []), ...(t.plan_tomorrow || []).map((b) => ({ ...b, title: `▸ ${b.title}` })),
     ...(t.personal || []).filter((e) => !isToday(e.start)),
     ...(t.overrides || []).filter((o) => !isToday(o.start))].sort((a, b) => new Date(a.start) - new Date(b.start));
   if (tomorrow.length) {
-    parts.push(`<section class="card"><h3>Tomorrow</h3><ul class="plain">${tomorrow.map((e) => `<li><time>${e.all_day ? 'all day' : time(e.start)}</time> ${esc(e.title)}</li>`).join('')}</ul></section>`);
+    parts.push(`<section class="card"><h3>Tomorrow</h3><ul class="plain">${tomorrow.map((e) => `<li><time>${e.all_day ? 'all day' : time(e.start)}</time><span>${esc(e.title)} ${chip(e.source === 'timetable' ? moduleOf(e) : null)}</span></li>`).join('')}</ul></section>`);
   }
   if (t.checkpoints?.length) {
     parts.push(`<section class="card"><h3>Checkpoints</h3><ul class="tasks">${t.checkpoints.map((cp) => `<li>
@@ -175,7 +199,7 @@ function todayView() {
 
 function taskCard(title, items, cls = '') {
   return `<section class="card ${cls}"><h3>${title}</h3><ul class="tasks">${items.map((d, i) => `<li>
-    <div><b>${esc(d.title)}</b><br><span class="muted">${esc(d.module || '')} ${d.source === 'clickup' ? (d.mine === false ? '· team' : '· yours') : ''} · ${dayShort(d.due)} ${time(d.due)} · ${until(d.due)}</span></div>
+    <div><b>${esc(d.title)}</b> ${chip(d.module)}<br><span class="muted small">${d.source === 'clickup' ? (d.mine === false ? 'team · ' : 'yours · ') : ''}${dayShort(d.due)} ${time(d.due)} · <span class="${new Date(d.due) - Date.now() < 3 * 86400000 ? 'soon' : ''}">${until(d.due)}</span></span></div>
     <div class="row">${d.source === 'todo' ? `<button data-action="done" data-id="${esc(d.id)}">✓</button>` : ''}${d.url ? `<a class="btn ghost" href="${esc(d.url)}" target="_blank" rel="noopener">Open</a>` : ''}
     <button class="ghost" data-action="delegate" data-task='${esc(JSON.stringify({ title: d.title, source: d.source, module: d.module, due: d.due, url: d.url }))}'>Delegate</button></div>
   </li>`).join('')}</ul></section>`;
@@ -207,8 +231,9 @@ function lecturesPane() {
   const lec = state.data.lectures || [];
   if (!lec.length) return '<p class="muted">No lectures yet.</p>';
   return `<ul class="list">${lec.map((l) => `<li data-action="open" data-path="${esc(l.path)}">
-    <b>${esc(l.name)}</b> <span class="muted">${esc(l.module)} · ${dayShort(l.date)}</span>
-    <p>${esc(l.tldr || 'Not summarised yet.')}</p></li>`).join('')}</ul>`;
+    <div class="li-head"><b>${esc(l.name)}</b>${chip(l.module)}</div>
+    <span class="muted small">${dayShort(l.date)}${(l.notes || 0) >= 2 ? ' · <span class="tag done">study notes</span>' : l.summarised ? ' · summary' : ''}</span>
+    <p>${esc(l.tldr || 'No notes yet.')}</p></li>`).join('')}</ul>`;
 }
 
 function groupPane() {
@@ -225,7 +250,7 @@ function groupPane() {
 
 function modulesPane() {
   const c = state.data.courses || [];
-  return `<ul class="list">${c.map((m) => `<li><b>${esc(m.code)}</b> <span class="muted">${esc(m.name.replace(/\s*\(.*$/, ''))}</span>
+  return `<ul class="list">${c.map((m) => `<li class="mod${rail(m.code)}"><div class="li-head"><b>${esc(m.name.replace(/\s*\(.*$/, ''))}</b>${chip(m.code)}</div>
     <div class="row"><button class="ghost" data-action="open" data-path="uni/${esc(m.code)}/index.md">Page</button>
     <button class="ghost" data-action="open" data-path="uni/${esc(m.code)}/announcements.md">Announcements</button>
     <a class="btn ghost" href="${esc(m.url)}" target="_blank" rel="noopener">Moodle</a></div></li>`).join('')}</ul>`;
@@ -370,13 +395,47 @@ async function openFile(path) {
     if (text == null) { ov.body.innerHTML = '<p class="muted">Not there yet.</p>'; return; }
     const isMd = /\.md$/.test(path.replace(/\.chunks\.json$/, ''));
     const name = path.split('/').pop().replace(/\.chunks\.json$/, '');
-    ov.body.innerHTML = `<div class="row"><button class="ghost" data-action="download" data-name="${esc(name)}">Download</button></div>`
-      + (isMd ? `<article class="md">${md(text)}</article>` : `<pre class="file">${esc(text)}</pre>`);
+    const bar = `<div class="row"><button class="ghost" data-action="download" data-name="${esc(name)}">Download</button></div>`;
+    if (/\/lectures\/[^/]+\.md$/.test(path)) {
+      ov.body.innerHTML = bar + lectureView(text);
+      ov.body.dataset.transcript = text.split(/\n## Transcript\s*\n/)[1] || '';
+    } else {
+      ov.body.innerHTML = bar + (isMd ? `<article class="md">${md(text)}</article>` : `<pre class="file">${esc(text)}</pre>`);
+    }
     ov.body.dataset.base = path.slice(0, path.lastIndexOf('/') + 1);
     ov.body.dataset.text = text.length < 2e6 ? text : '';
   } catch (err) {
     ov.body.innerHTML = `<p class="err">${esc(err.message)}</p>`;
   }
+}
+
+// A lecture file: header, notes (or the old summary), then the transcript.
+// The notes get a contents list; the transcript is collapsed and only rendered
+// when opened, since it can be 60k characters.
+function lectureView(text) {
+  const [notes, transcript] = text.split(/\n## Transcript\s*\n/);
+  const cut = notes.search(/\n## /);
+  const top = cut < 0 ? notes : notes.slice(0, cut);  // title, module, recorded, slides
+  const headings = [];
+  const html = md(cut < 0 ? '' : notes.slice(cut), { ids: true, headings });
+  const toc = headings.filter((h) => h.level >= 2 && h.level <= 3);
+  const words = transcript ? transcript.split(/\s+/).length : 0;
+  return `<article class="md notes">
+    ${md(top)}
+    ${toc.length > 2 ? `<nav class="toc" aria-label="Contents"><h4>Contents</h4><ol>${toc.map((h) =>
+      `<li class="l${h.level}"><a href="#${h.id}" data-action="jump" data-id="${h.id}">${esc(h.text)}</a></li>`).join('')}</ol></nav>` : ''}
+    ${html}
+    ${transcript ? `<details class="transcript"><summary>Transcript <span class="muted">· ${words.toLocaleString('en-GB')} words</span></summary><div class="tx"></div></details>` : ''}
+  </article>
+  <button class="totop ghost" data-action="totop" aria-label="Back to top">↑</button>`;
+}
+
+// "../files/x.md" from uni/C/lectures/ → uni/C/files/x.md
+function resolvePath(base, rel) {
+  const parts = (base + rel).split('/');
+  const out = [];
+  for (const p of parts) { if (p === '..') out.pop(); else if (p !== '.') out.push(p); }
+  return out.join('/');
 }
 
 function overlay(html) {
@@ -408,6 +467,14 @@ async function delegateDialog(task) {
 // ---------------------------------------------------------------- events
 
 document.addEventListener('click', async (e) => {
+  // links inside rendered markdown that point at repo files (they have no data-action)
+  const link = e.target.closest('a[data-path]');
+  if (link && !link.dataset.action) {
+    e.preventDefault();
+    const base = link.closest('.body')?.dataset.base || '';
+    openFile(resolvePath(base, link.dataset.path));
+    return;
+  }
   const el = e.target.closest('[data-action]');
   if (!el || el.tagName === 'FORM' || el.tagName === 'SELECT') return;
   const a = el.dataset.action;
@@ -416,6 +483,11 @@ document.addEventListener('click', async (e) => {
   else if (a === 'mailTab') { state.mailTab = el.dataset.k; draw(); }
   else if (a === 'open') { e.preventDefault(); openFile(el.dataset.path); }
   else if (a === 'close') el.closest('.overlay').remove();
+  else if (a === 'jump') {
+    e.preventDefault();
+    const target = document.getElementById(el.dataset.id);
+    target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } else if (a === 'totop') el.closest('.sheet')?.scrollTo({ top: 0, behavior: 'smooth' });
   else if (a === 'delegate') delegateDialog(JSON.parse(el.dataset.task));
   else if (a === 'refresh') refresh();
   else if (a === 'newchat') { state.chat = { history: [], shown: [] }; saveChat(); draw(); }
@@ -446,14 +518,18 @@ document.addEventListener('click', async (e) => {
     } catch (err) { alert(err.message); }
     draw();
   }
-  // links inside rendered markdown that point at repo files
-  const link = e.target.closest('a[data-path]');
-  if (link) {
-    e.preventDefault();
-    const base = link.closest('.body')?.dataset.base || '';
-    openFile(base + link.dataset.path);
-  }
 });
+
+// Render a lecture transcript the first time it's opened.
+document.addEventListener('toggle', (e) => {
+  const d = e.target;
+  if (!d.classList?.contains('transcript') || !d.open) return;
+  const box = $('.tx', d);
+  if (box && !box.dataset.done) {
+    box.innerHTML = md(d.closest('.body')?.dataset.transcript || '');
+    box.dataset.done = '1';
+  }
+}, true);
 
 document.addEventListener('change', (e) => {
   if (e.target.id === 'model' && /^gemini-/.test(e.target.value)) ai.settings.model = e.target.value;
@@ -504,7 +580,7 @@ document.addEventListener('submit', async (e) => {
   }
 });
 
-document.querySelectorAll('nav button').forEach((b) => b.addEventListener('click', () => {
+document.querySelectorAll('nav.tabs button').forEach((b) => b.addEventListener('click', () => {
   state.tab = b.dataset.tab; localStorage.setItem('tab', state.tab); draw();
 }));
 
