@@ -21,6 +21,9 @@ const state = {
   tab: localStorage.getItem('tab') || 'today',
   uniTab: localStorage.getItem('uniTab') || 'deadlines',
   mailTab: 'important',
+  todayTab: localStorage.getItem('todayTab') || 'day',
+  day: null,       // the day picked in Today's week strip (null = today)
+  week: 0,         // 0 = this week, 1 = next
   data: {},
   pending: [],     // proposed actions waiting for Confirm
   jobs: [],        // delegated jobs, queued and finished
@@ -32,10 +35,18 @@ const scrolls = {};
 
 // ---------------------------------------------------------------- formatting
 
-const fmt = (iso, opts) => (iso ? new Date(iso).toLocaleString('en-GB', { timeZone: TZ, ...opts }) : '');
+// Intl formatters are slow to create, so each format is made once and reused
+// (Today formats hundreds of dates to draw the week strip).
+const formatters = new Map();
+function formatter(locale, opts) {
+  const key = locale + JSON.stringify(opts);
+  if (!formatters.has(key)) formatters.set(key, new Intl.DateTimeFormat(locale, { timeZone: TZ, ...opts }));
+  return formatters.get(key);
+}
+const fmt = (iso, opts) => (iso ? formatter('en-GB', opts).format(new Date(iso)) : '');
 const time = (iso) => fmt(iso, { hour: '2-digit', minute: '2-digit' });
 const dayShort = (iso) => fmt(iso, { weekday: 'short', day: 'numeric', month: 'short' });
-const londonDate = (d = new Date()) => d.toLocaleDateString('en-CA', { timeZone: TZ });
+const londonDate = (d = new Date()) => formatter('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
 const when = (iso) => `${dayShort(iso)}, ${time(iso)}`;
 
 function until(iso) {
@@ -134,7 +145,8 @@ function blocked() {
 const FILES = {
   today: 'today.json', deadlines: 'uni/deadlines.json', lectures: 'uni/lectures.json',
   courses: 'uni/courses.json', mail: 'uni/email/index.json', clickup: 'schedule/clickup.json',
-  runs: 'state/runs.json', todos: 'schedule/todos.json',
+  runs: 'state/runs.json', todos: 'schedule/todos.json', calendar: 'schedule/calendar.json', plan: 'schedule/plan.json',
+  skipped: 'schedule/skipped.json',
 };
 
 function fromCache() {
@@ -245,6 +257,7 @@ function draw({ enter = false } = {}) {
     if (b.dataset.tab === state.tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
   });
   document.body.dataset.tab = state.tab;
+  $('#top .brand').textContent = { today: 'Today', uni: 'Uni', mail: 'Mail', chat: 'Chat', settings: 'Settings' }[state.tab] || 'Life';
   writeRoute();
   if (!gh.configured() && state.tab !== 'settings') { main.innerHTML = setupView(); chat.unmounted(); return; }
   const view = { today: todayView, uni: uniView, mail: mailView, chat: chat.view, settings: settingsView }[state.tab];
@@ -265,6 +278,9 @@ function setupView() {
 }
 
 // ---------------------------------------------------------------- Today
+// Glanceable first: a week strip, then Day (now/next, focus, what needs you,
+// the agenda) or Tasks (checkpoints, overdue, due this week). Details are one
+// tap away, not on the first screen.
 
 // Today is built hourly (07:00-23:00). Older than 3 hours while awake means a run was missed.
 function staleNote(t) {
@@ -275,11 +291,159 @@ function staleNote(t) {
     <button class="link" data-action="run" data-wf="pulse.yml" data-label="Today">Update now</button></div>`;
 }
 
+const dayCache = new Map();
+const dayOf = (iso) => {
+  if (!iso || iso.length <= 10) return iso;
+  if (!dayCache.has(iso)) dayCache.set(iso, londonDate(new Date(iso)));
+  return dayCache.get(iso);
+};
+const addDays = (date, n) => { const d = new Date(`${date}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+const shortRoom = (loc) => {
+  const rooms = (loc || '').split(',').map((r) => r.trim().replace(/^JC (Computer Science|Business School)\s*/i, '')).filter(Boolean);
+  return rooms.length > 1 ? `${rooms[0]} +${rooms.length - 1}` : rooms[0] || '';
+};
+
+function skippedEvent(e) {
+  const skip = state.data.skipped || [];
+  return skip.some((s) => e.id === s || (e.id || '').startsWith(`${s}_`));
+}
+
+// Everything on one day, from the 14-day calendar, the plan, chat changes and
+// deadlines. Falls back to today.json when the calendar file isn't there yet.
+function agenda(date) {
+  const t = state.data.today || {};
+  const cal = state.data.calendar;
+  const rows = [];
+  if (cal) {
+    for (const e of cal.timetable || []) if (dayOf(e.start) === date) rows.push({ ...e, kind: 'class', mod: moduleOf(e) });
+    for (const e of cal.personal || []) {
+      if (dayOf(e.start) !== date || e.response === 'declined' || skippedEvent(e) || e.life_kind) continue;
+      rows.push({ ...e, kind: 'personal', allDay: e.all_day });
+    }
+  } else if (date === londonDate()) {
+    for (const e of t.classes || []) rows.push({ ...e, kind: 'class', mod: moduleOf(e) });
+    for (const e of t.personal || []) if (dayOf(e.start) === date) rows.push({ ...e, kind: 'personal', allDay: e.all_day });
+  } else if (date === addDays(londonDate(), 1)) {
+    for (const e of t.tomorrow || []) rows.push({ ...e, kind: 'class', mod: moduleOf(e) });
+  }
+  const blocks = state.data.plan?.blocks || (date === londonDate() ? t.plan_today : date === addDays(londonDate(), 1) ? t.plan_tomorrow : []) || [];
+  for (const b of blocks) if (dayOf(b.start) === date) rows.push({ ...b, kind: `plan ${b.kind || ''}`, plan: true });
+  for (const o of t.overrides || []) if (!o.cancelled && dayOf(o.start) === date) rows.push({ ...o, kind: 'override' });
+  return rows.sort((a, b) => (a.allDay ? -1 : 0) - (b.allDay ? -1 : 0) || new Date(a.start) - new Date(b.start));
+}
+
+// What's due on a day (Moodle, ClickUp key dates, to-dos), for the strip's dots and the agenda.
+function dueOn(date) {
+  const t = state.data.today || {};
+  const seen = new Set();
+  return [...(t.due || []), ...(t.overdue || []), ...(state.data.deadlines || [])]
+    .filter((d) => d.due && dayOf(d.due) === date && !seen.has(d.title) && seen.add(d.title));
+}
+
+const TILE = { class: I.book, personal: I.calendar, override: I.edit, plan: I.sparkle, gym: I.play, due: I.clock };
+function tileFor(r) {
+  if (r.kind.startsWith('plan')) return /gym/i.test(r.kind + r.title) ? I.play : I.sparkle;
+  if (r.kind === 'class' && /group|project/i.test(r.title)) return I.users;
+  return TILE[r.kind] || I.calendar;
+}
+
+function weekStrip(sel) {
+  const today = londonDate();
+  const monday = addDays(today, -((new Date(`${today}T12:00:00Z`).getUTCDay() + 6) % 7));
+  const start = addDays(monday, 7 * (state.week || 0));
+  const days = Array.from({ length: 7 }, (_, i) => addDays(start, i));
+  const month = new Date(`${start}T12:00:00Z`).toLocaleDateString('en-GB', { month: 'long', timeZone: 'UTC' });
+  return `<div class="week">
+    <div class="week-head"><b>${month}</b>
+      <div class="row"><button class="icon sm" data-action="week" data-d="-1" aria-label="Previous week" ${state.week <= 0 ? 'disabled' : ''}>${I.chevL}</button>
+      <button class="icon sm" data-action="week" data-d="1" aria-label="Next week" ${state.week >= 1 ? 'disabled' : ''}>${I.chevR}</button></div></div>
+    <div class="days" role="tablist" aria-label="Days">${days.map((d) => {
+      const dt = new Date(`${d}T12:00:00Z`);
+      const has = agenda(d).some((r) => !r.allDay);
+      const due = dueOn(d).length;
+      return `<button role="tab" aria-selected="${d === sel}" class="day-btn${d === sel ? ' on' : ''}${d === today ? ' today' : ''}${d < today ? ' past' : ''}" data-action="pickday" data-day="${d}"
+        aria-label="${dt.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' })}${due ? `, ${due} due` : ''}">
+        <span class="dw">${dt.toLocaleDateString('en-GB', { weekday: 'narrow', timeZone: 'UTC' })}</span><span class="dn">${dt.getUTCDate()}</span>
+        <span class="dots">${has ? '<i></i>' : ''}${due ? '<i class="due"></i>' : ''}</span></button>`;
+    }).join('')}</div></div>`;
+}
+
+// The one card to read first: what's on now, or next, with the room.
+function heroCard(rows) {
+  const now = Date.now();
+  const timed = rows.filter((r) => !r.allDay);
+  const live = timed.find((r) => new Date(r.start) <= now && now < new Date(r.end || r.start));
+  const next = timed.find((r) => new Date(r.start) > now);
+  const r = live || next;
+  if (!r) {
+    const tmrw = agenda(addDays(londonDate(), 1)).filter((x) => !x.allDay)[0];
+    return `<section class="hero quiet"><span class="eyebrow">Nothing else today</span>
+      ${tmrw ? `<p class="hero-title">Tomorrow starts ${time(tmrw.start)} · ${esc(tmrw.title)}</p>` : '<p class="hero-title">A free evening</p>'}</section>`;
+  }
+  const label = live ? `Now · until ${time(r.end)}` : `Next · ${until(r.start)}`;
+  return `<section class="hero${rail(r.mod)}${live ? ' live' : ''}"><span class="eyebrow">${label}</span>
+    <p class="hero-title">${r.plan ? '▸ ' : ''}${esc(r.title)}</p>
+    <p class="hero-meta">${time(r.start)}–${time(r.end)}${r.location ? ` · ${esc(shortRoom(r.location))}` : ''} ${chip(r.mod)}</p>
+    ${r.first_step ? `<p class="hero-step">Start with: ${esc(r.first_step)}</p>` : ''}</section>`;
+}
+
+// Focus in one line; the full briefing, the week's plan and timetable changes behind a tap.
+function focusCard(t) {
+  const b = t.brief;
+  if (!b) return '';
+  const changes = (t.changes || []).slice(0, 5);
+  return `<details class="focus-card"><summary>${I.sparkle}<span class="f-text"><span class="eyebrow">Focus</span>
+      <span class="f-what">${esc(b.focus?.what || b.headline || '')}</span></span><span class="chev">${I.chevD}</span></summary>
+    <div class="f-more">${b.focus?.why ? `<p class="muted">${esc(b.focus.why)}</p>` : ''}
+      ${b.headline && b.focus ? `<p><b>${esc(b.headline)}</b></p>` : ''}
+      <ul class="items">${(b.items || []).map((i) => `<li class="k-${esc(i.kind)}"><span>${KIND[i.kind] || I.clock}</span><span class="txt">${esc(i.text)}</span></li>`).join('')}</ul>
+      ${t.plan_summary ? `<p class="muted small">This week: ${esc(t.plan_summary)}</p>` : ''}
+      ${changes.length ? `<p class="small"><b>Timetable changes</b></p><ul class="plainlist small">${changes.map((c) => `<li>${esc(c.text)}</li>`).join('')}</ul>` : ''}</div></details>`;
+}
+
+// Everything with a date that's open, soonest first: the Tasks tab and the "needs you" strip.
+function openTasks() {
+  const t = state.data.today || {};
+  const now = Date.now();
+  const cps = (t.checkpoints || []).map((cp) => ({ ...cp, source: 'checkpoint', group: 'Checkpoints' }));
+  // anything past its date is overdue, whichever list it came from (newest first)
+  const dated = [...(t.overdue || []), ...(t.due || [])].map((d) => ({ ...d, group: new Date(d.due) < now ? 'Overdue' : 'Due in the next 7 days' }));
+  const over = dated.filter((d) => d.group === 'Overdue').sort((a, b) => new Date(b.due) - new Date(a.due));
+  const due = dated.filter((d) => d.group !== 'Overdue').sort((a, b) => new Date(a.due) - new Date(b.due));
+  return [...over, ...cps, ...due].filter((d) => !state.hidden.has(d.id));
+}
+
+function taskRow(d) {
+  const doneable = d.source === 'todo' || d.source === 'checkpoint';
+  const soon = new Date(d.due) - Date.now() < 3 * 864e5;
+  const meta = [d.source === 'checkpoint' ? `for ${d.for}` : null, d.source === 'clickup' ? (d.mine === false ? 'team' : 'yours') : null,
+    when(d.due)].filter(Boolean).join(' · ');
+  return `<li class="trow" data-row="${esc(d.id || '')}">
+    <button class="trow-main" data-action="expand" aria-expanded="false">
+      <span class="trow-title">${esc(d.title)}</span>
+      <span class="trow-meta">${chip(d.module)}<span class="when${soon ? ' soon' : ''}">${until(d.due)}</span><span class="muted">· ${esc(meta)}</span></span></button>
+    ${doneable ? `<button class="tick" data-action="done" data-id="${esc(d.id)}" data-title="${esc(d.title)}" aria-label="Mark done: ${esc(d.title)}">${I.check}</button>` : ''}
+    <div class="trow-acts">${d.url ? `<a class="btn ghost sm" href="${esc(d.url)}" target="_blank" rel="noopener">${I.open}Open</a>` : ''}
+      <button class="ghost sm" data-action="delegate" data-task='${esc(JSON.stringify({ title: d.title, source: d.source, module: d.module, due: d.due, url: d.url }))}'>${I.delegate}Delegate</button></div></li>`;
+}
+
+function taskCard(title, items, cls = '') {
+  const rows = items.filter((d) => !state.hidden.has(d.id));
+  if (!rows.length) return '';
+  return `<section class="card ${cls}"><h3>${title} <span class="count">${rows.length}</span></h3><ul class="trows">${rows.map(taskRow).join('')}</ul></section>`;
+}
+
+function pendingCard() {
+  return `<section class="card confirm"><h3>Waiting for your OK</h3>${state.pending.map((a) => `<div class="pending">
+    <span>${esc(a.summary)}</span><div class="row"><button data-action="decide" data-yes="1" data-id="${a.id}">Confirm</button>
+    <button class="ghost" data-action="decide" data-yes="0" data-id="${a.id}">Dismiss</button></div></div>`).join('')}</section>`;
+}
+
 function todayView() {
   const t = state.data.today;
-  const parts = [];
-  parts.push(`<header class="day"><h1>${fmt(new Date().toISOString(), { weekday: 'long', day: 'numeric', month: 'long' })}</h1>
-    ${t ? `<span class="muted small">Updated ${ago(t.generated)}</span>` : ''}</header>`);
+  const sel = state.day || londonDate();
+  const isToday = sel === londonDate();
+  const parts = [`<p class="dateline">${fmt(new Date().toISOString(), { weekday: 'long', day: 'numeric', month: 'long' })}${t ? ` · updated ${ago(t.generated)}` : ''}</p>`];
   parts.push(statusNote());
   if (!t) {
     if (firstLoad()) return parts.join('') + skeleton('cards', 3);
@@ -287,74 +451,51 @@ function todayView() {
       'The hourly job builds it from your timetable, deadlines and email.', `<button data-action="run" data-wf="pulse.yml" data-label="Today">Build it now</button>`));
   }
   parts.push(staleNote(t));
-
-  const b = t.brief;
-  if (b) {
-    parts.push(`<section class="card brief"><h2>${esc(b.headline || '')}</h2><ul class="items">
-      ${(b.items || []).map((i) => `<li class="k-${esc(i.kind)}"><span>${KIND[i.kind] || I.clock}</span><span class="txt">${esc(i.text)}</span></li>`).join('')}
-      </ul>${b.focus ? `<div class="focus"><strong>Focus:</strong> ${esc(b.focus.what)}<br><span class="muted">${esc(b.focus.why || '')}</span></div>` : ''}</section>`);
-  }
-  if (t.plan_summary) parts.push(`<p class="muted small week">This week: ${esc(t.plan_summary)}</p>`);
+  const tasks = openTasks();
+  const urgent = tasks.filter((d) => d.group === 'Overdue' || d.source === 'checkpoint' || new Date(d.due) - Date.now() < 2 * 864e5).length;
+  parts.push(`<div class="seg pill" role="tablist" aria-label="Today">
+    <button role="tab" aria-selected="${state.todayTab !== 'tasks'}" class="${state.todayTab !== 'tasks' ? 'on' : ''}" data-action="todayTab" data-k="day">Day</button>
+    <button role="tab" aria-selected="${state.todayTab === 'tasks'}" class="${state.todayTab === 'tasks' ? 'on' : ''}" data-action="todayTab" data-k="tasks">Tasks${tasks.length ? ` <span class="badge${urgent ? ' hot' : ''}">${tasks.length}</span>` : ''}</button></div>`);
   if (state.pending.length) parts.push(pendingCard());
 
-  if (t.changes?.length) {
-    const shown = t.changes.slice(0, 5);
-    parts.push(`<section class="card warn"><h3>Timetable changes</h3><ul class="plainlist">${shown.map((c) => `<li>${esc(c.text)}</li>`).join('')}</ul>
-      ${t.changes.length > 5 ? `<p class="muted small">and ${t.changes.length - 5} more</p>` : ''}</section>`);
+  if (state.todayTab === 'tasks') {
+    const by = (g) => tasks.filter((d) => d.group === g);
+    const body = taskCard('Overdue', by('Overdue'), 'warn') + taskCard('Checkpoints', by('Checkpoints')) + taskCard('Due in the next 7 days', by('Due in the next 7 days'));
+    return parts.join('') + `<div class="pane">${body || empty(I.check, 'All clear', 'Nothing overdue and nothing due in the next 7 days.')}</div>`;
   }
 
-  const today = londonDate();
-  const isToday = (iso) => iso && londonDate(new Date(iso)) === today;
-  const rows = [
-    ...(t.classes || []).map((e) => ({ start: e.start, end: e.end, title: e.title, where: e.location, kind: 'class', mod: moduleOf(e) })),
-    ...(t.personal || []).filter((e) => isToday(e.start)).map((e) => ({ start: e.start, end: e.end, title: e.title, where: e.location, kind: e.source, allDay: e.all_day })),
-    ...(t.overrides || []).filter((o) => isToday(o.start)).map((o) => ({ start: o.start, end: o.end, title: o.title, where: o.location, kind: 'override', note: o.note })),
-    ...(t.plan_today || []).map((b2) => ({ start: b2.start, end: b2.end, title: b2.title, kind: `plan ${b2.kind}`, step: b2.first_step, why: b2.for })),
-  ].sort((a, b2) => (a.allDay ? -1 : 0) - (b2.allDay ? -1 : 0) || new Date(a.start) - new Date(b2.start));
+  const rows = agenda(sel);
+  const due = dueOn(sel);
   const now = Date.now();
-  parts.push(`<section class="card"><h3>Today</h3>${rows.length ? `<ol class="timeline">${rows.map((r) => {
-    const live = !r.allDay && new Date(r.start) <= now && now < new Date(r.end || r.start);
-    const past = !r.allDay && new Date(r.end || r.start) < now;
-    return `<li class="${r.kind}${rail(r.mod)}${live ? ' live' : ''}${past ? ' past' : ''}"><time>${r.allDay ? 'all day' : time(r.start)}</time>
-      <div><b>${r.kind.startsWith('plan') ? '▸ ' : ''}${esc(r.title)}</b> ${chip(r.mod)}${live ? ' <span class="now">now</span>' : ''}
-      ${r.where ? `<div class="muted small">${esc(r.where)}</div>` : ''}${r.note ? `<span class="tag">changed: ${esc(r.note)}</span>` : ''}
-      ${r.step ? `<div class="muted small">Start with: ${esc(r.step)}</div>` : ''}</div></li>`;
-  }).join('')}</ol>` : '<p class="muted">Nothing else on today.</p>'}</section>`);
-
-  const tomorrow = [...(t.tomorrow || []), ...(t.plan_tomorrow || []).map((b2) => ({ ...b2, title: `▸ ${b2.title}` })),
-    ...(t.personal || []).filter((e) => !isToday(e.start)),
-    ...(t.overrides || []).filter((o) => !isToday(o.start))].sort((a, b2) => new Date(a.start) - new Date(b2.start));
-  if (tomorrow.length) {
-    parts.push(`<section class="card"><h3>Tomorrow</h3><ul class="plain">${tomorrow.map((e) => `<li><time>${e.all_day ? 'all day' : time(e.start)}</time><span>${esc(e.title)} ${chip(e.source === 'timetable' ? moduleOf(e) : null)}</span></li>`).join('')}</ul></section>`);
+  const day = [weekStrip(sel)];
+  if (isToday) {
+    day.push(heroCard(rows), focusCard(t));
+    // what's coming in the next 48 hours first, then the most recently missed
+    const soon = tasks.filter((d) => new Date(d.due) >= now && new Date(d.due) - now < 2 * 864e5).sort((a, b) => new Date(a.due) - new Date(b.due));
+    const missed = tasks.filter((d) => new Date(d.due) < now).sort((a, b) => new Date(b.due) - new Date(a.due));
+    const needs = [...soon, ...missed].slice(0, 3);
+    if (needs.length) {
+      day.push(`<section class="card tight"><h3>Needs you <button class="link" data-action="todayTab" data-k="tasks">All tasks (${tasks.length})</button></h3>
+        <ul class="trows">${needs.map(taskRow).join('')}</ul></section>`);
+    }
   }
-  const cps = (t.checkpoints || []).filter((cp) => !state.hidden.has(cp.id));
-  if (cps.length) {
-    parts.push(`<section class="card"><h3>Checkpoints</h3><ul class="tasks">${cps.map((cp) => `<li data-row="${esc(cp.id)}">
-      <div class="task-text"><b>${esc(cp.title)}</b><span class="muted small">for ${esc(cp.for)} · ${when(cp.due)} · ${until(cp.due)}</span></div>
-      <div class="task-acts"><button class="round-sm" data-action="done" data-id="${esc(cp.id)}" data-title="${esc(cp.title)}" aria-label="Mark done: ${esc(cp.title)}">${I.check}</button></div></li>`).join('')}</ul></section>`);
-  }
-  if (t.overdue?.length) parts.push(taskCard('Overdue', t.overdue, 'warn'));
-  if (t.due?.length) parts.push(taskCard('Due in the next 7 days', t.due));
-  parts.push(`<form class="ask" data-action="ask"><input name="q" placeholder="Tell it something… e.g. group meeting moved to Thu 3pm" autocomplete="off" aria-label="Tell the organiser something">
+  // on today, only deadlines still ahead (the missed ones are in Needs you / Tasks)
+  const dueRows = due.filter((d) => !isToday || new Date(d.due) > now).map((d) => ({ start: d.due, title: d.title, kind: 'due', mod: d.module, dueItem: true }));
+  const list = [...rows, ...dueRows].sort((a, b) => (a.allDay ? -1 : 0) - (b.allDay ? -1 : 0) || new Date(a.start) - new Date(b.start));
+  const label = isToday ? 'Schedule' : new Date(`${sel}T12:00:00Z`).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' });
+  day.push(`<section class="card tight"><h3>${label}</h3>${list.length ? `<ol class="agenda">${list.map((r) => {
+    const live = isToday && !r.allDay && !r.dueItem && new Date(r.start) <= now && now < new Date(r.end || r.start);
+    const past = isToday && !r.allDay && new Date(r.end || r.start) < now;
+    const sub = r.dueItem ? 'Due' : [r.location ? shortRoom(r.location) : '', r.note ? `changed: ${r.note}` : ''].filter(Boolean).join(' · ');
+    return `<li class="ag ${r.kind}${rail(r.mod)}${live ? ' live' : ''}${past ? ' past' : ''}">
+      <time>${r.allDay ? 'all day' : time(r.start)}${r.end && !r.allDay && !r.dueItem && dayOf(r.end) === dayOf(r.start) ? `<span>${time(r.end)}</span>` : ''}</time>
+      <span class="tile">${r.dueItem ? I.clock : tileFor(r)}</span>
+      <span class="ag-text"><b>${esc(r.title)}</b><span class="ag-meta">${chip(r.mod)}${sub ? `<span>${esc(sub)}</span>` : ''}${live ? '<span class="now">now</span>' : ''}</span>
+      ${r.first_step && !past ? `<span class="ag-step">Start with: ${esc(r.first_step)}</span>` : ''}</span></li>`;
+  }).join('')}</ol>` : `<p class="muted">${isToday ? 'Nothing else on today.' : 'Nothing on this day.'}</p>`}</section>`);
+  day.push(`<form class="ask" data-action="ask"><input name="q" placeholder="Tell it something…" autocomplete="off" aria-label="Tell the organiser something">
     <button class="round" aria-label="Send to chat">${I.send}</button></form>`);
-  return parts.join('');
-}
-
-function taskCard(title, items, cls = '') {
-  const rows = items.filter((d) => !state.hidden.has(d.id));
-  if (!rows.length) return '';
-  return `<section class="card ${cls}"><h3>${title}</h3><ul class="tasks">${rows.map((d) => `<li data-row="${esc(d.id || '')}">
-    <div class="task-text"><b>${esc(d.title)}</b> ${chip(d.module)}<span class="muted small">${d.source === 'clickup' ? (d.mine === false ? 'team · ' : 'yours · ') : ''}${when(d.due)} · <span class="${new Date(d.due) - Date.now() < 3 * 864e5 ? 'soon' : ''}">${until(d.due)}</span></span></div>
-    <div class="task-acts">${d.source === 'todo' ? `<button class="round-sm" data-action="done" data-id="${esc(d.id)}" data-title="${esc(d.title)}" aria-label="Mark done: ${esc(d.title)}">${I.check}</button>` : ''}
-    ${d.url ? `<a class="btn ghost sm" href="${esc(d.url)}" target="_blank" rel="noopener">${I.open}Open</a>` : ''}
-    <button class="ghost sm" data-action="delegate" data-task='${esc(JSON.stringify({ title: d.title, source: d.source, module: d.module, due: d.due, url: d.url }))}'>${I.delegate}Delegate</button></div>
-  </li>`).join('')}</ul></section>`;
-}
-
-function pendingCard() {
-  return `<section class="card confirm"><h3>Waiting for your OK</h3>${state.pending.map((a) => `<div class="pending">
-    <span>${esc(a.summary)}</span><div class="row"><button data-action="decide" data-yes="1" data-id="${a.id}">Confirm</button>
-    <button class="ghost" data-action="decide" data-yes="0" data-id="${a.id}">Dismiss</button></div></div>`).join('')}</section>`;
+  return parts.join('') + `<div class="pane">${day.join('')}</div>`;
 }
 
 // ---------------------------------------------------------------- Uni
@@ -619,6 +760,28 @@ window.addEventListener('touchmove', (e) => {
   ptr.style.transform = `translate(-50%, ${pull.d}px) rotate(${pull.d * 3}deg)`;
   ptr.classList.toggle('ready', pull.d > 64);
 }, { passive: true });
+// swipe left or right on Today's Day view to move a day
+let swipe = null;
+window.addEventListener('touchstart', (e) => {
+  swipe = state.tab === 'today' && state.todayTab !== 'tasks' && e.touches.length === 1 && e.target.closest('.week, .agenda, .hero')
+    ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : null;
+}, { passive: true });
+window.addEventListener('touchend', (e) => {
+  if (!swipe) return;
+  const t = e.changedTouches[0];
+  const dx = t.clientX - swipe.x;
+  const dy = t.clientY - swipe.y;
+  swipe = null;
+  if (Math.abs(dx) < 60 || Math.abs(dy) > 40) return;
+  const today = londonDate();
+  const next = addDays(state.day || today, dx < 0 ? 1 : -1);
+  const monday = addDays(today, -((new Date(`${today}T12:00:00Z`).getUTCDay() + 6) % 7));
+  if (next < monday || next > addDays(monday, 13)) return; // the calendar holds two weeks
+  state.day = next === today ? null : next;
+  state.week = next >= addDays(monday, 7) ? 1 : 0;
+  draw();
+  if (!reducedMotion()) $('.agenda')?.closest('.card')?.classList.add(dx < 0 ? 'from-right' : 'from-left');
+});
 window.addEventListener('touchend', () => {
   if (!pull) return;
   const go2 = pull.d > 64;
@@ -670,7 +833,24 @@ document.addEventListener('click', async (e) => {
   if (!el || el.tagName === 'FORM' || el.tagName === 'SELECT') return;
   const a = el.dataset.action;
   if (a === 'tab') go(el.dataset.tab);
-  else if (a === 'uniTab' || a === 'mailTab') {
+  else if (a === 'todayTab') {
+    state.todayTab = el.dataset.k; localStorage.setItem('todayTab', state.todayTab);
+    draw();
+    if (!reducedMotion()) $('.pane')?.classList.add('enter');
+    if (el.closest('.card')) window.scrollTo({ top: 0, behavior: reducedMotion() ? 'auto' : 'smooth' });
+  } else if (a === 'pickday') {
+    state.day = el.dataset.day === londonDate() ? null : el.dataset.day;
+    draw();
+  } else if (a === 'week') {
+    state.week = Math.max(0, Math.min(1, (state.week || 0) + +el.dataset.d));
+    const monday = addDays(londonDate(), -((new Date(`${londonDate()}T12:00:00Z`).getUTCDay() + 6) % 7));
+    state.day = state.week ? addDays(monday, 7) : null;
+    draw();
+  } else if (a === 'expand') {
+    const row = el.closest('.trow');
+    const open = row.classList.toggle('open');
+    el.setAttribute('aria-expanded', String(open));
+  } else if (a === 'uniTab' || a === 'mailTab') {
     if (a === 'uniTab') { state.uniTab = el.dataset.k; localStorage.setItem('uniTab', state.uniTab); } else state.mailTab = el.dataset.k;
     draw();
     const pane = $('.pane');

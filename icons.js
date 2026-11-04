@@ -33,5 +33,8 @@ export const I = {
   inbox: svg('<path d="M3 13h5l1.5 3h5l1.5-3h5"/><path d="M5 5h14l2 8v6H3v-6z"/>'),
   sparkle: svg('<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5L18 18M6 18l2.5-2.5M15.5 8.5L18 6"/>'),
   play: svg('<path d="M7 4l13 8-13 8z"/>'),
+  chevL: svg('<path d="M15 5l-7 7 7 7"/>'),
+  chevR: svg('<path d="M9 5l7 7-7 7"/>'),
+  chevD: svg('<path d="M6 9l6 6 6-6"/>'),
   refresh: svg('<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>'),
 };
