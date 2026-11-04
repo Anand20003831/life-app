@@ -14,6 +14,13 @@ key that is also stored only on the device.
 | `gh.js` | every read and write to the private data repo; uploads split big files into chunks |
 | `ai.js` | the chat: Gemini with tools, model and effort choice |
 | `md.js` | a small, escaping Markdown renderer |
-| `sw.js` | offline shell; bump `CACHE` when files change |
+| `icons.js` | the one icon set (inline SVG, follows the theme) |
+| `ui.js` | toasts (with Undo) and the reduced-motion check |
+| `sw.js` | offline shell, cache first; bump `CACHE` when any file changes, and the app offers "A new version is ready · Reload" |
+| `offline.html` | shown only if the app itself can't load with no signal |
+
+Every screen has a loading state (skeletons), an empty state that says what will appear,
+and a problem state: offline shows the saved copy with when it was saved; an error has Retry.
+Links into the app: `#today`, `#uni/<deadlines|lectures|group|modules|jobs>`, `#mail/<important|forum|noise>`, `#chat`, `#settings`.
 
 `localStorage.apiBase` points the app at a local mock of the GitHub API for testing. Leave it unset in real use.

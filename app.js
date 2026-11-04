@@ -1,11 +1,17 @@
 // Life: the organiser's app. Plain modules, no build step; GitHub Pages serves
 // this folder as-is. All data lives in the private life-data repo (gh.js); the
 // chat and delegated jobs use Gemini (ai.js).
+//
+// Every screen has four states: loading (skeletons), ready, empty (says what
+// will appear and when), and a problem: offline (cached data, with when it was
+// saved), or an error with Retry. Data older than expected is flagged as stale.
 
 import * as gh from './gh.js';
 import * as ai from './ai.js';
 import * as chat from './chat.js';
 import { render as md, esc } from './md.js';
+import { I } from './icons.js';
+import { toast, reducedMotion } from './ui.js';
 
 const TZ = 'Europe/London';
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -19,7 +25,10 @@ const state = {
   pending: [],     // proposed actions waiting for Confirm
   jobs: [],        // delegated jobs, queued and finished
   pendingLoaded: false,
+  status: { kind: 'idle' }, // idle | loading | ok | offline | error | auth
+  hidden: new Set(), // rows marked done this session (optimistic, undoable)
 };
+const scrolls = {};
 
 // ---------------------------------------------------------------- formatting
 
@@ -27,25 +36,27 @@ const fmt = (iso, opts) => (iso ? new Date(iso).toLocaleString('en-GB', { timeZo
 const time = (iso) => fmt(iso, { hour: '2-digit', minute: '2-digit' });
 const dayShort = (iso) => fmt(iso, { weekday: 'short', day: 'numeric', month: 'short' });
 const londonDate = (d = new Date()) => d.toLocaleDateString('en-CA', { timeZone: TZ });
+const when = (iso) => `${dayShort(iso)}, ${time(iso)}`;
 
 function until(iso) {
   const ms = new Date(iso) - Date.now();
   const h = Math.round(ms / 3600000);
   if (ms < 0) return h > -24 ? `${-h}h ago` : `${Math.round(-h / 24)}d ago`;
-  if (h < 1) return `${Math.max(1, Math.round(ms / 60000))} min`;
-  if (h < 36) return `${h}h`;
-  return `${Math.round(h / 24)} days`;
+  if (h < 1) return `in ${Math.max(1, Math.round(ms / 60000))} min`;
+  if (h < 36) return `in ${h}h`;
+  return `in ${Math.round(h / 24)} days`;
 }
 
 function ago(iso) {
   if (!iso) return 'never';
-  const m = Math.round((Date.now() - new Date(iso)) / 60000);
+  const m = Math.max(0, Math.round((Date.now() - new Date(iso)) / 60000));
+  if (m < 1) return 'just now';
   if (m < 60) return `${m} min ago`;
   if (m < 48 * 60) return `${Math.round(m / 60)}h ago`;
   return `${Math.round(m / 1440)}d ago`;
 }
 
-const KIND = { change: '⚠', focus: '◎', heads_up: '•', people: '♥', admin: '✎' };
+const KIND = { change: I.alert, focus: I.sparkle, heads_up: I.clock, people: I.users, admin: I.edit };
 
 // ---------------------------------------------------------------- modules: one colour each
 
@@ -70,6 +81,54 @@ function modIndex(code) {
 const chip = (code) => (code ? `<span class="chip m${modIndex(code)}">${esc(code.replace(/^COMP/, ''))}</span>` : '');
 const rail = (code) => (code ? ` m${modIndex(code)}` : '');
 
+// ---------------------------------------------------------------- shared pieces
+
+function empty(icon, title, text, action = '') {
+  return `<div class="empty-state">${icon}<h2>${esc(title)}</h2><p class="muted">${text}</p>${action}</div>`;
+}
+
+// Placeholder shapes while the first load is under way (nothing cached yet).
+function skeleton(kind = 'cards', n = 3) {
+  const line = (w) => `<span class="sk" style="width:${w}%"></span>`;
+  if (kind === 'list') {
+    return `<div class="skel" aria-busy="true" aria-label="Loading">${Array.from({ length: n }, () =>
+      `<div class="sk-card">${line(70)}${line(35)}${line(90)}</div>`).join('')}</div>`;
+  }
+  if (kind === 'text') return `<div class="skel" aria-busy="true" aria-label="Loading">${line(60)}${line(95)}${line(88)}${line(92)}${line(40)}</div>`;
+  return `<div class="skel" aria-busy="true" aria-label="Loading">${Array.from({ length: n }, (_, i) =>
+    `<div class="sk-card">${line(i ? 30 : 75)}${line(92)}${line(84)}${i ? '' : line(66)}</div>`).join('')}</div>`;
+}
+
+const firstLoad = () => state.status.kind === 'loading' && !localStorage.getItem('lastSync');
+
+// The line under each screen's title: when the data was saved, and any problem.
+function statusNote() {
+  const s = state.status;
+  const saved = localStorage.getItem('lastSync');
+  const retry = `<button class="link" data-action="refresh">Retry</button>`;
+  if (s.kind === 'offline') {
+    if (!saved) return ''; // nothing to show: the screen's own offline panel says so
+    return `<div class="note" role="status">${I.offline}<span>Offline · showing what was saved ${ago(saved)}</span>${retry}</div>`;
+  }
+  if (s.kind === 'error') {
+    if (!saved) return ''; // the screen shows the error panel instead
+    return `<div class="note bad" role="alert">${I.alert}<span>Couldn't refresh: ${esc(s.msg)}</span>${retry}</div>`;
+  }
+  if (s.kind === 'auth') {
+    return `<section class="card warn" role="alert"><h2>Can't open your data</h2><p>${esc(s.msg)}</p>
+      <div class="row"><button data-action="tab" data-tab="settings">Settings</button><button class="ghost" data-action="refresh">Retry</button></div></section>`;
+  }
+  return '';
+}
+
+// A screen with no data at all and a problem: one clear message, not an empty page.
+function blocked() {
+  const s = state.status;
+  if (s.kind === 'offline') return empty(I.offline, "You're offline", 'Nothing has been saved on this device yet. Connect once and it will work offline after that.', `<button data-action="refresh">Retry</button>`);
+  if (s.kind === 'error') return empty(I.alert, "Couldn't load", esc(s.msg), `<button data-action="refresh">Retry</button>`);
+  return '';
+}
+
 // ---------------------------------------------------------------- data
 
 const FILES = {
@@ -80,83 +139,168 @@ const FILES = {
 
 function fromCache() {
   for (const [k, path] of Object.entries(FILES)) state.data[k] = gh.cachedJSON(path, state.data[k] ?? null);
-  state.pending = gh.cachedJSON('c:pending', []) || [];
+  try { state.pending = JSON.parse(localStorage.getItem('pending') || '[]'); } catch { state.pending = []; }
 }
 
+function classify(err) {
+  if (!navigator.onLine || err instanceof TypeError || /GitHub 5\d\d/.test(err.message)) return 'offline';
+  if (/token|can't see|public repo|can read but not write/i.test(err.message)) return 'auth';
+  return 'error';
+}
+
+let syncing = null;
+// Loads everything; redraws only if something changed, so an unchanged refresh
+// costs no layout and nothing on screen moves.
 async function refresh() {
-  if (!gh.configured()) return;
-  setStatus('syncing');
-  try {
-    await gh.checkAccess();
-    await Promise.all(Object.entries(FILES).map(async ([k, path]) => { state.data[k] = await gh.readJSON(path, null); }));
-    await Promise.all([loadPending(), loadJobs()]);
-    setStatus('ok');
-  } catch (err) {
-    setStatus('error', err.message);
-  }
-  draw();
+  if (!gh.configured()) return null;
+  if (syncing) return syncing;
+  syncing = (async () => {
+    const before = JSON.stringify([state.data, state.pending, state.jobs]);
+    const was = state.status.kind;
+    state.status = { kind: 'loading' };
+    setDot('syncing');
+    if (firstLoad()) draw();
+    let changed = false;
+    try {
+      if (!navigator.onLine) throw new TypeError('offline');
+      await gh.checkAccess();
+      const got = await Promise.all(Object.entries(FILES).map(async ([k, p]) => [k, await gh.readJSON(p, null)]));
+      for (const [k, v] of got) state.data[k] = v;
+      await Promise.all([loadPending(), loadJobs()]);
+      localStorage.setItem('lastSync', new Date().toISOString());
+      state.status = { kind: 'ok' };
+    } catch (err) {
+      state.status = { kind: classify(err), msg: err.message };
+    }
+    setDot();
+    changed = JSON.stringify([state.data, state.pending, state.jobs]) !== before;
+    if (changed || state.status.kind !== was || was === 'idle') draw();
+    return { changed, status: state.status.kind };
+  })();
+  try { return await syncing; } finally { syncing = null; }
 }
 
+// Only the inbox folders that exist are listed (a missing one is a 404).
+async function inboxDirs() {
+  const items = await gh.list('inbox');
+  return new Set(items.filter((i) => i.type === 'dir').map((i) => i.name));
+}
 
+let dirs = null;
 async function loadPending() {
-  const files = (await gh.list('inbox/actions')).filter((f) => f.name.endsWith('.json'));
+  dirs = await inboxDirs();
+  const files = dirs.has('actions') ? (await gh.list('inbox/actions')).filter((f) => f.name.endsWith('.json')) : [];
   const all = await Promise.all(files.map((f) => gh.readJSON(f.path, null)));
   state.pending = all.filter((a) => a && a.status === 'proposed');
   state.pendingLoaded = true;
+  try { localStorage.setItem('pending', JSON.stringify(state.pending)); } catch { /* full */ }
 }
 
 async function loadJobs() {
-  const [queued, done] = await Promise.all([gh.list('inbox/delegate'), gh.list('inbox/delegate-done')]);
+  dirs ||= await inboxDirs();
+  const [queued, done] = await Promise.all(['delegate', 'delegate-done'].map((d) => (dirs.has(d) ? gh.list(`inbox/${d}`) : [])));
   const read = (list) => Promise.all(list.filter((f) => f.name.endsWith('.json')).map((f) => gh.readJSON(f.path, null)));
   state.jobs = [...await read(queued), ...await read(done)].filter(Boolean)
     .sort((a, b) => (b.created || '').localeCompare(a.created || ''));
 }
 
-let statusText = '';
-function setStatus(kind, detail = '') {
-  statusText = kind === 'error' ? detail : '';
+function setDot(kind) {
   const dot = $('#sync');
-  dot.className = `sync ${kind}`;
-  dot.title = kind === 'error' ? detail : kind;
+  const k = kind || { ok: 'ok', loading: 'syncing', offline: 'offline', error: 'error', auth: 'error' }[state.status.kind] || '';
+  dot.className = `sync ${k}`;
+  const saved = localStorage.getItem('lastSync');
+  dot.setAttribute('aria-label', { ok: `Synced ${ago(saved)}`, syncing: 'Syncing…', offline: `Offline · saved ${ago(saved)}`, error: 'Sync problem' }[k] || 'Sync status');
 }
 
-// ---------------------------------------------------------------- shell
+// ---------------------------------------------------------------- shell + routing
 
-function draw() {
-  document.querySelectorAll('nav.tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === state.tab));
-  if (!gh.configured() && state.tab !== 'settings') { main.innerHTML = setupView(); return; }
+// #today, #uni/lectures, #mail/forum, #chat, #settings (notifications link here)
+function readRoute() {
+  const [tab, sub] = location.hash.slice(1).split('/');
+  if (!['today', 'uni', 'mail', 'chat', 'settings'].includes(tab)) return false;
+  state.tab = tab;
+  if (tab === 'uni' && ['deadlines', 'lectures', 'group', 'modules', 'jobs'].includes(sub)) state.uniTab = sub;
+  if (tab === 'mail' && ['important', 'forum', 'noise'].includes(sub)) state.mailTab = sub;
+  return true;
+}
+
+function writeRoute() {
+  const sub = state.tab === 'uni' ? `/${state.uniTab}` : state.tab === 'mail' ? `/${state.mailTab}` : '';
+  history.replaceState(history.state, '', `#${state.tab}${sub}`);
+}
+
+function go(tab) {
+  if (tab === state.tab) { window.scrollTo({ top: 0, behavior: reducedMotion() ? 'auto' : 'smooth' }); return; }
+  scrolls[state.tab] = window.scrollY;
+  state.tab = tab;
+  localStorage.setItem('tab', tab);
+  draw({ enter: true });
+  window.scrollTo(0, scrolls[tab] || 0);
+}
+
+const drawn = { tab: '', html: '' };
+function draw({ enter = false } = {}) {
+  document.querySelectorAll('nav.tabs button').forEach((b) => {
+    b.classList.toggle('on', b.dataset.tab === state.tab);
+    if (b.dataset.tab === state.tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+  });
+  document.body.dataset.tab = state.tab;
+  writeRoute();
+  if (!gh.configured() && state.tab !== 'settings') { main.innerHTML = setupView(); chat.unmounted(); return; }
   const view = { today: todayView, uni: uniView, mail: mailView, chat: chat.view, settings: settingsView }[state.tab];
-  main.innerHTML = view();
+  const html = view();
+  // Same screen, same HTML: leave the DOM alone (no repaint, nothing re-created,
+  // focus and selection kept). Most background refreshes end here.
+  if (state.tab !== 'chat' && !enter && html === drawn.html && drawn.tab === state.tab && main.firstChild) return;
+  drawn.html = html;
+  drawn.tab = state.tab;
+  main.innerHTML = html;
+  if (enter && !reducedMotion()) { main.classList.remove('enter'); void main.offsetWidth; main.classList.add('enter'); }
   if (state.tab === 'chat') chat.mounted(); else chat.unmounted();
 }
 
 function setupView() {
-  return `<section class="card"><h2>Set up this device</h2>
-    <p>This app reads your private <code>life-data</code> repo and talks to Gemini. It needs the repo name and two keys, stored only on this device.</p>
-    <button data-action="tab" data-tab="settings">Open settings</button></section>`;
+  return empty(I.sparkle, 'Set up this device', 'This app reads your private <code>life-data</code> repo and talks to Gemini. It needs the repo name and two keys, stored only on this device.',
+    `<button data-action="tab" data-tab="settings">Open Settings</button>`);
 }
 
 // ---------------------------------------------------------------- Today
+
+// Today is built hourly (07:00-23:00). Older than 3 hours while awake means a run was missed.
+function staleNote(t) {
+  const hours = (Date.now() - new Date(t.generated)) / 36e5;
+  const hourNow = +fmt(new Date().toISOString(), { hour: '2-digit', hour12: false });
+  if (hours < 3 || hourNow < 9) return '';
+  return `<div class="note warn" role="status">${I.clock}<span>Today was built ${ago(t.generated)}; the hourly update may be late.</span>
+    <button class="link" data-action="run" data-wf="pulse.yml" data-label="Today">Update now</button></div>`;
+}
 
 function todayView() {
   const t = state.data.today;
   const parts = [];
   parts.push(`<header class="day"><h1>${fmt(new Date().toISOString(), { weekday: 'long', day: 'numeric', month: 'long' })}</h1>
-    ${t ? `<span class="muted">updated ${ago(t.generated)}</span>` : ''}</header>`);
-  if (statusText) parts.push(`<section class="card warn"><b>Can't load your data</b><p>${esc(statusText)}</p><button data-action="tab" data-tab="settings">Settings</button></section>`);
-  if (!t) return parts.join('') + '<p class="muted">Nothing built yet. The cloud job runs hourly.</p>';
+    ${t ? `<span class="muted small">Updated ${ago(t.generated)}</span>` : ''}</header>`);
+  parts.push(statusNote());
+  if (!t) {
+    if (firstLoad()) return parts.join('') + skeleton('cards', 3);
+    return parts.join('') + (blocked() || empty(I.calendar, "Today isn't built yet",
+      'The hourly job builds it from your timetable, deadlines and email.', `<button data-action="run" data-wf="pulse.yml" data-label="Today">Build it now</button>`));
+  }
+  parts.push(staleNote(t));
 
   const b = t.brief;
   if (b) {
     parts.push(`<section class="card brief"><h2>${esc(b.headline || '')}</h2><ul class="items">
-      ${(b.items || []).map((i) => `<li class="k-${esc(i.kind)}"><span>${KIND[i.kind] || '•'}</span>${esc(i.text)}</li>`).join('')}
+      ${(b.items || []).map((i) => `<li class="k-${esc(i.kind)}"><span>${KIND[i.kind] || I.clock}</span><span class="txt">${esc(i.text)}</span></li>`).join('')}
       </ul>${b.focus ? `<div class="focus"><strong>Focus:</strong> ${esc(b.focus.what)}<br><span class="muted">${esc(b.focus.why || '')}</span></div>` : ''}</section>`);
   }
-  if (t.plan_summary) parts.push(`<p class="muted small">This week: ${esc(t.plan_summary)}</p>`);
+  if (t.plan_summary) parts.push(`<p class="muted small week">This week: ${esc(t.plan_summary)}</p>`);
   if (state.pending.length) parts.push(pendingCard());
 
   if (t.changes?.length) {
-    parts.push(`<section class="card warn"><h3>Timetable changes</h3><ul>${t.changes.map((c) => `<li>${esc(c.text)}</li>`).join('')}</ul></section>`);
+    const shown = t.changes.slice(0, 5);
+    parts.push(`<section class="card warn"><h3>Timetable changes</h3><ul class="plainlist">${shown.map((c) => `<li>${esc(c.text)}</li>`).join('')}</ul>
+      ${t.changes.length > 5 ? `<p class="muted small">and ${t.changes.length - 5} more</p>` : ''}</section>`);
   }
 
   const today = londonDate();
@@ -165,8 +309,8 @@ function todayView() {
     ...(t.classes || []).map((e) => ({ start: e.start, end: e.end, title: e.title, where: e.location, kind: 'class', mod: moduleOf(e) })),
     ...(t.personal || []).filter((e) => isToday(e.start)).map((e) => ({ start: e.start, end: e.end, title: e.title, where: e.location, kind: e.source, allDay: e.all_day })),
     ...(t.overrides || []).filter((o) => isToday(o.start)).map((o) => ({ start: o.start, end: o.end, title: o.title, where: o.location, kind: 'override', note: o.note })),
-    ...(t.plan_today || []).map((b) => ({ start: b.start, end: b.end, title: b.title, kind: `plan ${b.kind}`, step: b.first_step, why: b.for })),
-  ].sort((a, b) => (a.allDay ? -1 : 0) - (b.allDay ? -1 : 0) || new Date(a.start) - new Date(b.start));
+    ...(t.plan_today || []).map((b2) => ({ start: b2.start, end: b2.end, title: b2.title, kind: `plan ${b2.kind}`, step: b2.first_step, why: b2.for })),
+  ].sort((a, b2) => (a.allDay ? -1 : 0) - (b2.allDay ? -1 : 0) || new Date(a.start) - new Date(b2.start));
   const now = Date.now();
   parts.push(`<section class="card"><h3>Today</h3>${rows.length ? `<ol class="timeline">${rows.map((r) => {
     const live = !r.allDay && new Date(r.start) <= now && now < new Date(r.end || r.start);
@@ -175,30 +319,35 @@ function todayView() {
       <div><b>${r.kind.startsWith('plan') ? '▸ ' : ''}${esc(r.title)}</b> ${chip(r.mod)}${live ? ' <span class="now">now</span>' : ''}
       ${r.where ? `<div class="muted small">${esc(r.where)}</div>` : ''}${r.note ? `<span class="tag">changed: ${esc(r.note)}</span>` : ''}
       ${r.step ? `<div class="muted small">Start with: ${esc(r.step)}</div>` : ''}</div></li>`;
-  }).join('')}</ol>` : '<p class="muted">Nothing on today.</p>'}</section>`);
+  }).join('')}</ol>` : '<p class="muted">Nothing else on today.</p>'}</section>`);
 
-  const tomorrow = [...(t.tomorrow || []), ...(t.plan_tomorrow || []).map((b) => ({ ...b, title: `▸ ${b.title}` })),
+  const tomorrow = [...(t.tomorrow || []), ...(t.plan_tomorrow || []).map((b2) => ({ ...b2, title: `▸ ${b2.title}` })),
     ...(t.personal || []).filter((e) => !isToday(e.start)),
-    ...(t.overrides || []).filter((o) => !isToday(o.start))].sort((a, b) => new Date(a.start) - new Date(b.start));
+    ...(t.overrides || []).filter((o) => !isToday(o.start))].sort((a, b2) => new Date(a.start) - new Date(b2.start));
   if (tomorrow.length) {
     parts.push(`<section class="card"><h3>Tomorrow</h3><ul class="plain">${tomorrow.map((e) => `<li><time>${e.all_day ? 'all day' : time(e.start)}</time><span>${esc(e.title)} ${chip(e.source === 'timetable' ? moduleOf(e) : null)}</span></li>`).join('')}</ul></section>`);
   }
-  if (t.checkpoints?.length) {
-    parts.push(`<section class="card"><h3>Checkpoints</h3><ul class="tasks">${t.checkpoints.map((cp) => `<li>
-      <div><b>${esc(cp.title)}</b><br><span class="muted">for ${esc(cp.for)} · ${dayShort(cp.due)} ${time(cp.due)} · ${until(cp.due)}</span></div>
-      <button data-action="done" data-id="${esc(cp.id)}">✓</button></li>`).join('')}</ul></section>`);
+  const cps = (t.checkpoints || []).filter((cp) => !state.hidden.has(cp.id));
+  if (cps.length) {
+    parts.push(`<section class="card"><h3>Checkpoints</h3><ul class="tasks">${cps.map((cp) => `<li data-row="${esc(cp.id)}">
+      <div class="task-text"><b>${esc(cp.title)}</b><span class="muted small">for ${esc(cp.for)} · ${when(cp.due)} · ${until(cp.due)}</span></div>
+      <div class="task-acts"><button class="round-sm" data-action="done" data-id="${esc(cp.id)}" data-title="${esc(cp.title)}" aria-label="Mark done: ${esc(cp.title)}">${I.check}</button></div></li>`).join('')}</ul></section>`);
   }
   if (t.overdue?.length) parts.push(taskCard('Overdue', t.overdue, 'warn'));
   if (t.due?.length) parts.push(taskCard('Due in the next 7 days', t.due));
-  parts.push(`<form class="ask" data-action="ask"><input name="q" placeholder="Tell it something… e.g. group meeting moved to Thu 3pm" autocomplete="off"><button>→</button></form>`);
+  parts.push(`<form class="ask" data-action="ask"><input name="q" placeholder="Tell it something… e.g. group meeting moved to Thu 3pm" autocomplete="off" aria-label="Tell the organiser something">
+    <button class="round" aria-label="Send to chat">${I.send}</button></form>`);
   return parts.join('');
 }
 
 function taskCard(title, items, cls = '') {
-  return `<section class="card ${cls}"><h3>${title}</h3><ul class="tasks">${items.map((d, i) => `<li>
-    <div><b>${esc(d.title)}</b> ${chip(d.module)}<br><span class="muted small">${d.source === 'clickup' ? (d.mine === false ? 'team · ' : 'yours · ') : ''}${dayShort(d.due)} ${time(d.due)} · <span class="${new Date(d.due) - Date.now() < 3 * 86400000 ? 'soon' : ''}">${until(d.due)}</span></span></div>
-    <div class="row">${d.source === 'todo' ? `<button data-action="done" data-id="${esc(d.id)}">✓</button>` : ''}${d.url ? `<a class="btn ghost" href="${esc(d.url)}" target="_blank" rel="noopener">Open</a>` : ''}
-    <button class="ghost" data-action="delegate" data-task='${esc(JSON.stringify({ title: d.title, source: d.source, module: d.module, due: d.due, url: d.url }))}'>Delegate</button></div>
+  const rows = items.filter((d) => !state.hidden.has(d.id));
+  if (!rows.length) return '';
+  return `<section class="card ${cls}"><h3>${title}</h3><ul class="tasks">${rows.map((d) => `<li data-row="${esc(d.id || '')}">
+    <div class="task-text"><b>${esc(d.title)}</b> ${chip(d.module)}<span class="muted small">${d.source === 'clickup' ? (d.mine === false ? 'team · ' : 'yours · ') : ''}${when(d.due)} · <span class="${new Date(d.due) - Date.now() < 3 * 864e5 ? 'soon' : ''}">${until(d.due)}</span></span></div>
+    <div class="task-acts">${d.source === 'todo' ? `<button class="round-sm" data-action="done" data-id="${esc(d.id)}" data-title="${esc(d.title)}" aria-label="Mark done: ${esc(d.title)}">${I.check}</button>` : ''}
+    ${d.url ? `<a class="btn ghost sm" href="${esc(d.url)}" target="_blank" rel="noopener">${I.open}Open</a>` : ''}
+    <button class="ghost sm" data-action="delegate" data-task='${esc(JSON.stringify({ title: d.title, source: d.source, module: d.module, due: d.due, url: d.url }))}'>${I.delegate}Delegate</button></div>
   </li>`).join('')}</ul></section>`;
 }
 
@@ -211,55 +360,63 @@ function pendingCard() {
 // ---------------------------------------------------------------- Uni
 
 function uniView() {
-  const tabs = [['deadlines', 'Deadlines'], ['lectures', 'Lectures'], ['group', 'Group'], ['modules', 'Modules'], ['jobs', 'Delegated']];
-  const seg = `<div class="seg">${tabs.map(([k, l]) => `<button class="${state.uniTab === k ? 'on' : ''}" data-action="uniTab" data-k="${k}">${l}</button>`).join('')}</div>`;
-  return seg + ({ deadlines: deadlinesPane, lectures: lecturesPane, group: groupPane, modules: modulesPane, jobs: jobsPane }[state.uniTab])();
+  const tabs = [['deadlines', 'Deadlines'], ['lectures', 'Lectures'], ['group', 'Group'], ['modules', 'Modules'], ['jobs', 'Jobs']];
+  const seg = `<div class="seg" role="tablist" aria-label="Uni">${tabs.map(([k, l]) => `<button role="tab" aria-selected="${state.uniTab === k}" class="${state.uniTab === k ? 'on' : ''}" data-action="uniTab" data-k="${k}">${l}</button>`).join('')}</div>`;
+  const need = { deadlines: 'deadlines', lectures: 'lectures', group: 'clickup', modules: 'courses', jobs: null }[state.uniTab];
+  let body;
+  if (need && state.data[need] == null && firstLoad()) body = skeleton('list', 4);
+  else if (need && state.data[need] == null && blocked()) body = blocked();
+  else body = ({ deadlines: deadlinesPane, lectures: lecturesPane, group: groupPane, modules: modulesPane, jobs: jobsPane }[state.uniTab])();
+  return statusNote() + seg + `<div class="pane">${body}</div>`;
 }
 
 function deadlinesPane() {
   const moodle = (state.data.deadlines || []).map((d) => ({ ...d, source: 'moodle' }));
   const team = (state.data.clickup?.tasks || []).filter((t) => !t.done && t.due && /key dates/i.test(t.list || ''))
     .map((t) => ({ title: t.name, due: t.due, url: t.url, source: 'clickup', module: 'COMP2002', mine: t.mine }));
-  const all = [...moodle, ...team].filter((d) => new Date(d.due) > Date.now() - 86400000).sort((a, b) => new Date(a.due) - new Date(b.due));
-  return all.length ? taskCard('Upcoming', all) : '<p class="muted">No deadlines found.</p>';
+  const all = [...moodle, ...team].filter((d) => new Date(d.due) > Date.now() - 864e5).sort((a, b) => new Date(a.due) - new Date(b.due));
+  return all.length ? taskCard('Upcoming', all) : empty(I.calendar, 'No deadlines coming up', 'Moodle deadlines and the group\'s ClickUp key dates show here. Moodle is checked at 8am and 6pm.');
 }
 
 function lecturesPane() {
   const lec = state.data.lectures || [];
-  if (!lec.length) return '<p class="muted">No lectures yet.</p>';
-  return `<ul class="list">${lec.map((l) => `<li data-action="open" data-path="${esc(l.path)}">
-    <div class="li-head"><b>${esc(l.name)}</b>${chip(l.module)}</div>
-    <span class="muted small">${dayShort(l.date)}${(l.notes || 0) >= 2 ? ' · <span class="tag done">study notes</span>' : l.summarised ? ' · summary' : ''}</span>
-    <p>${esc(l.tldr || 'No notes yet.')}</p></li>`).join('')}</ul>`;
+  if (!lec.length) return empty(I.book, 'No lectures yet', 'Recordings appear here after the 8am and 6pm sync, with study notes and the transcript.');
+  return `<ul class="list">${lec.map((l) => `<li><button class="li-btn" data-action="open" data-path="${esc(l.path)}" data-title="${esc(l.name)}">
+    <span class="li-head"><b>${esc(l.name)}</b>${chip(l.module)}</span>
+    <span class="muted small">${dayShort(l.date)} · ${(l.notes || 0) >= 2 ? '<span class="tag done">Study notes</span>' : l.summarised ? '<span class="tag plain">Summary</span>' : '<span class="tag plain">Transcript only</span>'}</span>
+    <span class="p">${esc(l.tldr || 'Notes are written at the next sync.')}</span></button></li>`).join('')}</ul>`;
 }
 
 function groupPane() {
+  if (!state.data.clickup) return empty(I.users, "ClickUp isn't linked yet", 'Once the ClickUp token is set, the group board shows here (Settings → Health).');
   const tasks = (state.data.clickup?.tasks || []).filter((t) => !t.done);
-  if (!state.data.clickup) return '<p class="muted">ClickUp isn\'t linked yet (see Settings → Health).</p>';
-  const row = (t) => `<li><div><b>${esc(t.name)}</b><br><span class="muted">${esc(t.list || '')} · ${esc(t.status || '')}${t.due ? ` · ${dayShort(t.due)} ${time(t.due)}` : ''}${t.assignees?.length ? ` · ${esc(t.assignees.join(', '))}` : ''}</span></div>
-    <div class="row"><a class="btn ghost" href="${esc(t.url)}" target="_blank" rel="noopener">Open</a>
-    <button class="ghost" data-action="delegate" data-task='${esc(JSON.stringify({ title: t.name, source: 'clickup', module: 'COMP2002', due: t.due, url: t.url, description: t.description }))}'>Delegate</button></div></li>`;
+  const row = (t) => `<li><div class="task-text"><b>${esc(t.name)}</b><span class="muted small">${esc(t.list || '')} · ${esc(t.status || '')}${t.due ? ` · ${when(t.due)}` : ''}${t.assignees?.length ? ` · ${esc(t.assignees.join(', '))}` : ''}</span></div>
+    <div class="task-acts"><a class="btn ghost sm" href="${esc(t.url)}" target="_blank" rel="noopener">${I.open}Open</a>
+    <button class="ghost sm" data-action="delegate" data-task='${esc(JSON.stringify({ title: t.name, source: 'clickup', module: 'COMP2002', due: t.due, url: t.url, description: t.description }))}'>${I.delegate}Delegate</button></div></li>`;
   const mine = tasks.filter((t) => t.mine);
   const rest = tasks.filter((t) => !t.mine);
-  return `<section class="card"><h3>Yours</h3><ul class="tasks">${mine.map(row).join('') || '<li class="muted">Nothing assigned to you.</li>'}</ul></section>
-    <section class="card"><h3>Team</h3><ul class="tasks">${rest.map(row).join('')}</ul></section>`;
+  return `<section class="card"><h3>Yours</h3>${mine.length ? `<ul class="tasks">${mine.map(row).join('')}</ul>` : '<p class="muted">Nothing assigned to you.</p>'}</section>
+    <section class="card"><h3>Team</h3>${rest.length ? `<ul class="tasks">${rest.map(row).join('')}</ul>` : '<p class="muted">No open team tasks.</p>'}</section>`;
 }
 
 function modulesPane() {
   const c = state.data.courses || [];
+  if (!c.length) return empty(I.book, 'No modules yet', 'Your Moodle modules appear after the first uni sync.');
   return `<ul class="list">${c.map((m) => `<li class="mod${rail(m.code)}"><div class="li-head"><b>${esc(m.name.replace(/\s*\(.*$/, ''))}</b>${chip(m.code)}</div>
-    <div class="row"><button class="ghost" data-action="open" data-path="uni/${esc(m.code)}/index.md">Page</button>
-    <button class="ghost" data-action="open" data-path="uni/${esc(m.code)}/announcements.md">Announcements</button>
-    <a class="btn ghost" href="${esc(m.url)}" target="_blank" rel="noopener">Moodle</a></div></li>`).join('')}</ul>`;
+    <div class="row"><button class="ghost sm" data-action="open" data-path="uni/${esc(m.code)}/index.md" data-title="${esc(m.code)} page">Page</button>
+    <button class="ghost sm" data-action="open" data-path="uni/${esc(m.code)}/announcements.md" data-title="${esc(m.code)} announcements">Announcements</button>
+    <a class="btn ghost sm" href="${esc(m.url)}" target="_blank" rel="noopener">${I.open}Moodle</a></div></li>`).join('')}</ul>`;
 }
 
 function jobsPane() {
-  if (!state.jobs.length) return '<p class="muted">Nothing delegated yet. Use Delegate on any task.</p>';
-  return `<ul class="list">${state.jobs.map((j) => `<li ${j.folder ? `data-action="open" data-path="${esc(j.folder)}/README.md"` : ''}>
-    <b>${esc(j.task?.title || 'Job')}</b> <span class="tag ${j.status}">${esc(j.status)}</span>
-    <p>${esc(j.instruction)}</p>
-    <span class="muted">${esc(j.used || j.model || 'default model')} · ${esc(j.effort || 'medium')} effort · ${ago(j.finished || j.created)}</span>
-    ${j.error ? `<p class="err">${esc(j.error)}</p>` : ''}</li>`).join('')}</ul>`;
+  if (!state.jobs.length) return empty(I.delegate, 'Nothing delegated yet', 'Tap Delegate on any deadline or group task to hand a small, non-assessed job to the cloud. Results land here.');
+  return `<ul class="list">${state.jobs.map((j) => {
+    const inner = `<span class="li-head"><b>${esc(j.task?.title || 'Job')}</b><span class="tag ${j.status}">${esc(j.status)}</span></span>
+      <span class="p">${esc(j.instruction)}</span>
+      <span class="muted small">${esc(j.used || j.model || 'default model')} · ${esc(j.effort || 'medium')} effort · ${ago(j.finished || j.created)}</span>
+      ${j.error ? `<span class="err small">${esc(j.error)}</span>` : ''}`;
+    return `<li>${j.folder ? `<button class="li-btn" data-action="open" data-path="${esc(j.folder)}/README.md" data-title="${esc(j.task?.title || 'Job')}">${inner}</button>` : `<div class="li-btn static">${inner}</div>`}</li>`;
+  }).join('')}</ul>`;
 }
 
 // ---------------------------------------------------------------- Mail
@@ -267,15 +424,22 @@ function jobsPane() {
 function mailView() {
   const tabs = [['important', 'Important'], ['forum', 'Forum'], ['noise', 'Filtered']];
   const pick = { important: ['direct', 'person'], forum: ['forum'], noise: ['noise', 'secret', 'reminder', 'sent'] }[state.mailTab];
+  const seg = `<div class="seg" role="tablist" aria-label="Mail">${tabs.map(([k, l]) => `<button role="tab" aria-selected="${state.mailTab === k}" class="${state.mailTab === k ? 'on' : ''}" data-action="mailTab" data-k="${k}">${l}</button>`).join('')}</div>`;
+  if (state.data.mail == null && firstLoad()) return statusNote() + seg + skeleton('list', 5);
+  if (state.data.mail == null && blocked()) return statusNote() + seg + blocked();
   const items = (state.data.mail || []).filter((m) => pick.includes(m.kind));
-  return `<div class="seg">${tabs.map(([k, l]) => `<button class="${state.mailTab === k ? 'on' : ''}" data-action="mailTab" data-k="${k}">${l}</button>`).join('')}</div>
-    <ul class="list">${items.map((m) => `<li ${m.path ? `data-action="open" data-path="${esc(m.path)}"` : ''}>
-      <b>${esc(m.subject)}</b><br><span class="muted">${m.kind === 'direct' ? '✉ ' : ''}${esc(m.from)} · ${dayShort(m.date)}${m.module ? ` · ${esc(m.module)}` : ''}</span></li>`).join('') || '<li class="muted">Nothing here.</li>'}</ul>`;
+  const none = { important: ['No important mail', 'Emails sent to you directly, and from staff, show here.'],
+                 forum: ['No forum posts', 'Moodle forum questions and answers show here.'],
+                 noise: ['Nothing filtered', 'Newsletters, reminders and sign-in codes are kept out of the way here (codes are never stored).'] }[state.mailTab];
+  return statusNote() + seg + `<div class="pane">${items.length ? `<ul class="list">${items.map((m) => `<li>${m.path ? `<button class="li-btn" data-action="open" data-path="${esc(m.path)}" data-title="${esc(m.subject)}">` : '<div class="li-btn static">'}
+      <b>${esc(m.subject)}</b><span class="muted small">${m.kind === 'direct' ? 'To you · ' : ''}${esc(m.from)} · ${dayShort(m.date)}${m.module ? ` · ${esc(m.module)}` : ''}</span>${m.path ? '</button>' : '</div>'}</li>`).join('')}</ul>`
+    : empty(I.mail, none[0], none[1])}</div>`;
 }
 
 // ---------------------------------------------------------------- Settings
 
 const EXPECT = { 'uni-sync': 13, 'lecture-sync': 13, 'mail-sync': 13, 'calendar-sync': 2, 'clickup-sync': 2, today: 2, planner: 26 };
+const JOB = { 'uni-sync': 'Moodle', 'lecture-sync': 'Lectures', 'mail-sync': 'Email', 'calendar-sync': 'Calendar', 'clickup-sync': 'ClickUp', today: 'Today briefing', planner: 'Week planner' };
 
 function settingsView() {
   const runs = state.data.runs || {};
@@ -286,48 +450,89 @@ function settingsView() {
     if (r) {
       const age = (Date.now() - new Date(r.last_ok || 0)) / 3600000;
       cls = r.status === 'ok' && age <= hours ? 'good' : age <= hours * 2 ? 'meh' : 'bad';
-      note = `${r.status === 'ok' ? 'ok' : esc(r.status)} · last good ${ago(r.last_ok)}`;
+      note = `${r.status === 'ok' ? (cls === 'good' ? 'OK' : 'late') : esc(r.status)} · last good ${ago(r.last_ok)}`;
     }
-    return `<li class="${cls}"><b>${job}</b> <span class="muted">${note}</span></li>`;
+    return `<li class="${cls}"><b>${JOB[job]}</b> <span class="muted small">${note}</span></li>`;
   }).join('');
   const masked = (v) => (v ? `${esc(v.slice(0, 6))}…${esc(v.slice(-4))}` : 'not set');
-  return `<section class="card"><h2>Keys (this device only)</h2>
+  const saved = localStorage.getItem('lastSync');
+  return `${statusNote()}<section class="card"><h2>Keys (this device only)</h2>
     <form data-action="savekeys" class="stack">
-      <label>GitHub token <span class="muted">${masked(gh.cfg.token)}</span><input name="ghToken" type="password" placeholder="github_pat_…" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
-      <label>Gemini API key <span class="muted">${masked(gh.cfg.geminiKey)}</span><input name="geminiKey" type="password" placeholder="paste to replace" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+      <label>GitHub token <span class="muted small">${masked(gh.cfg.token)}</span><input name="ghToken" type="password" placeholder="github_pat_…" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+      <label>Gemini API key <span class="muted small">${masked(gh.cfg.geminiKey)}</span><input name="geminiKey" type="password" placeholder="Paste to replace" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
       <label>Data repo <input name="repo" value="${gh.cfg.owner ? `${esc(gh.cfg.owner)}/${esc(gh.cfg.repo)}` : ''}" placeholder="your-username/life-data" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
       <button>Save</button></form></section>
-    <section class="card"><h2>Run now</h2><div class="row wrap">
-      <button data-action="run" data-wf="uni-sync.yml">Check Moodle, lectures + email</button>
-      <button data-action="run" data-wf="pulse.yml">Refresh calendar + ClickUp + Today</button>
-      <button data-action="replan">Re-plan the week</button>
-      <button class="ghost" data-action="refresh">Reload data</button></div>
-      <p class="muted small">A run takes 1–5 minutes; you get a notification for anything new.</p></section>
+    <section class="card"><h2>Run now</h2><div class="stack-btns">
+      <button class="ghost" data-action="run" data-wf="uni-sync.yml" data-label="Moodle, lectures and email">${I.play}Check Moodle, lectures and email</button>
+      <button class="ghost" data-action="run" data-wf="pulse.yml" data-label="Calendar, ClickUp and Today">${I.play}Refresh calendar, ClickUp and Today</button>
+      <button class="ghost" data-action="replan">${I.calendar}Re-plan the week</button>
+      <button class="ghost" data-action="refresh">${I.refresh}Reload data on this device</button></div>
+      <p class="muted small">A run takes 1 to 5 minutes; you get a notification for anything new.</p></section>
     <section class="card"><h2>Health</h2><ul class="health">${health}</ul>
-      ${statusText ? `<p class="err">${esc(statusText)}</p>` : ''}</section>`;
+      <p class="muted small">This device last synced ${ago(saved)}. The dot at the top is green when synced, blue while syncing, grey offline, red on a problem.</p></section>`;
 }
 
-// ---------------------------------------------------------------- reader + delegate overlays
+// ---------------------------------------------------------------- sheets (reader, delegate)
 
-async function openFile(path) {
-  const ov = overlay(`<p class="muted">Loading…</p>`);
-  try {
-    const text = await gh.readMaybeChunked(path);
-    if (text == null) { ov.body.innerHTML = '<p class="muted">Not there yet.</p>'; return; }
-    const isMd = /\.md$/.test(path.replace(/\.chunks\.json$/, ''));
-    const name = path.split('/').pop().replace(/\.chunks\.json$/, '');
-    const bar = `<div class="row"><button class="ghost" data-action="download" data-name="${esc(name)}">Download</button></div>`;
-    if (/\/lectures\/[^/]+\.md$/.test(path)) {
-      ov.body.innerHTML = bar + lectureView(text);
-      ov.body.dataset.transcript = text.split(/\n## Transcript\s*\n/)[1] || '';
-    } else {
-      ov.body.innerHTML = bar + (isMd ? `<article class="md">${md(text)}</article>` : `<pre class="file">${esc(text)}</pre>`);
+// A sheet is one step in the history, so Android's back button closes it.
+function overlay(html, { title = '', download = '', full = false } = {}) {
+  const el = document.createElement('div');
+  el.className = 'overlay';
+  el.innerHTML = `<div class="sheet${full ? ' full' : ''}" role="dialog" aria-modal="true" aria-label="${esc(title || 'Details')}">
+    <div class="sheet-bar"><span class="sheet-title">${esc(title)}</span>
+      ${download ? `<button class="icon" data-action="download" data-name="${esc(download)}" aria-label="Download">${I.download}</button>` : ''}
+      <button class="icon" data-action="close" aria-label="Close">${I.x}</button></div>
+    <div class="body">${html}</div></div>`;
+  document.body.append(el);
+  document.body.classList.add('sheet-open');
+  history.pushState({ sheet: (history.state?.sheet || 0) + 1 }, '');
+  $('.sheet [data-action=close]', el).focus({ preventScroll: true });
+  return { el, body: $('.body', el) };
+}
+
+function closeTop({ fromHistory = false } = {}) {
+  const all = document.querySelectorAll('.overlay:not(.closing)');
+  const el = all[all.length - 1];
+  if (!el) return false;
+  if (!fromHistory && history.state?.sheet) { history.back(); return true; } // popstate closes it
+  el.classList.add('closing');
+  setTimeout(() => {
+    el.remove();
+    if (!document.querySelector('.overlay')) document.body.classList.remove('sheet-open');
+  }, reducedMotion() ? 0 : 180);
+  return true;
+}
+
+window.addEventListener('popstate', () => {
+  if (closeTop({ fromHistory: true })) return;
+  chat.back();
+});
+
+async function openFile(path, title) {
+  const name = path.split('/').pop().replace(/\.chunks\.json$/, '');
+  // full height from the start, so the sheet doesn't jump when the file arrives
+  const ov = overlay(skeleton('text'), { title: title || name.replace(/\.md$/, ''), download: name, full: true });
+  const load = async () => {
+    try {
+      const text = await gh.readMaybeChunked(path);
+      if (text == null) { ov.body.innerHTML = empty(I.file, 'Not there yet', 'This file hasn\'t been written yet. It usually appears after the next sync.'); return; }
+      const isMd = /\.md$/.test(path.replace(/\.chunks\.json$/, ''));
+      if (/\/lectures\/[^/]+\.md$/.test(path)) {
+        ov.body.innerHTML = lectureView(text);
+        ov.body.dataset.transcript = text.split(/\n## Transcript\s*\n/)[1] || '';
+      } else {
+        ov.body.innerHTML = isMd ? `<article class="md">${md(text)}</article>` : `<pre class="file">${esc(text)}</pre>`;
+      }
+      ov.body.dataset.base = path.slice(0, path.lastIndexOf('/') + 1);
+      ov.body.dataset.text = text.length < 2e6 ? text : '';
+    } catch (err) {
+      const off = classify(err) === 'offline';
+      ov.body.innerHTML = empty(off ? I.offline : I.alert, off ? "Can't open this offline" : "Couldn't open this",
+        off ? 'Files are fetched when you open them. Try again when you have signal.' : esc(err.message), '<button class="retry-file">Retry</button>');
+      $('.retry-file', ov.body).onclick = () => { ov.body.innerHTML = skeleton('text'); load(); };
     }
-    ov.body.dataset.base = path.slice(0, path.lastIndexOf('/') + 1);
-    ov.body.dataset.text = text.length < 2e6 ? text : '';
-  } catch (err) {
-    ov.body.innerHTML = `<p class="err">${esc(err.message)}</p>`;
-  }
+  };
+  load();
 }
 
 // A lecture file: header, notes (or the old summary), then the transcript.
@@ -348,7 +553,7 @@ function lectureView(text) {
     ${html}
     ${transcript ? `<details class="transcript"><summary>Transcript <span class="muted">· ${words.toLocaleString('en-GB')} words</span></summary><div class="tx"></div></details>` : ''}
   </article>
-  <button class="totop ghost" data-action="totop" aria-label="Back to top">↑</button>`;
+  <button class="totop ghost" data-action="totop" aria-label="Back to top">${I.up}</button>`;
 }
 
 // "../files/x.md" from uni/C/lectures/ → uni/C/files/x.md
@@ -359,33 +564,97 @@ function resolvePath(base, rel) {
   return out.join('/');
 }
 
-function overlay(html) {
-  const el = document.createElement('div');
-  el.className = 'overlay';
-  el.innerHTML = `<div class="sheet"><button class="close" data-action="close">✕</button><div class="body">${html}</div></div>`;
-  document.body.append(el);
-  return { el, body: $('.body', el) };
-}
-
 async function delegateDialog(task) {
-  const ov = overlay(`<h2>Delegate</h2><p><b>${esc(task.title)}</b><br><span class="muted">${esc(task.module || '')} ${task.due ? `· due ${dayShort(task.due)}` : ''}</span></p>
+  const cached = ai.cachedModels();
+  const current = ai.settings.model;
+  const opts = (list) => list.map((m) => `<option ${m.id === current ? 'selected' : ''}>${esc(m.id)}</option>`).join('');
+  const ov = overlay(`<p class="lead"><b>${esc(task.title)}</b><br><span class="muted small">${esc(task.module || '')}${task.due ? ` · due ${when(task.due)}` : ''}</span></p>
     <form class="stack" data-action="delegate-go">
       <label>What should it do? <textarea name="instruction" rows="4" required placeholder="e.g. write 15 practice questions with answers on this topic; or draft test cases for my parser"></textarea></label>
-      <div class="row"><label>Model <select name="model"><option>loading…</option></select></label>
+      <div class="row two"><label>Model <select name="model">${cached.length ? opts(cached) : '<option value="">Default</option>'}</select></label>
       <label>Effort <select name="effort">${['low', 'medium', 'high'].map((e) => `<option ${e === ai.settings.effort ? 'selected' : ''}>${e}</option>`).join('')}</select></label></div>
-      <label>Files (optional) <input name="files" type="file" multiple></label>
-      <p class="muted small">For non-assessed prep and practice. Results land in Uni → Delegated, and you get a notification.</p>
-      <button>Start</button><p class="progress muted small"></p></form>`);
+      <div class="files-field"><label class="btn ghost sm">${I.plus}Add files<input name="files" type="file" multiple hidden></label><span class="muted small picked">Optional: PDFs, images, code</span></div>
+      <p class="muted small">For non-assessed prep and practice. Results land in Uni → Jobs, and you get a notification.</p>
+      <button>Start</button><p class="progress muted small" role="status"></p></form>`, { title: 'Delegate' });
   $('form', ov.el).dataset.task = JSON.stringify(task);
-  try {
-    const [all, current] = await Promise.all([ai.models(), ai.defaultModel()]);
-    $('select[name=model]', ov.el).innerHTML = all.map((m) => `<option ${m.id === current ? 'selected' : ''}>${esc(m.id)}</option>`).join('');
-  } catch {
-    $('select[name=model]', ov.el).innerHTML = '<option value="">default</option>';
+  $('input[type=file]', ov.el).addEventListener('change', (e) => {
+    const n = e.target.files.length;
+    $('.picked', ov.el).textContent = n ? [...e.target.files].map((f) => f.name).join(', ') : 'Optional: PDFs, images, code';
+  });
+  if (!cached.length) {
+    try {
+      const all = await ai.models();
+      $('select[name=model]', ov.el).innerHTML = opts(all);
+    } catch { /* keeps "Default" */ }
   }
 }
 
+// ---------------------------------------------------------------- pull to refresh
+
+const ptr = document.createElement('div');
+ptr.className = 'ptr';
+ptr.innerHTML = I.refresh;
+ptr.setAttribute('aria-hidden', 'true');
+document.body.append(ptr);
+let pull = null;
+
+async function pullRefresh() {
+  ptr.classList.add('spin');
+  const got = await refresh();
+  ptr.classList.remove('spin', 'ready');
+  ptr.style.transform = '';
+  if (!got) return;
+  toast(got.status === 'ok' ? (got.changed ? 'Updated' : 'Already up to date') : got.status === 'offline' ? 'Offline: showing saved data' : "Couldn't refresh");
+}
+
+window.addEventListener('touchstart', (e) => {
+  if (!['today', 'uni', 'mail'].includes(state.tab) || window.scrollY > 0 || document.querySelector('.overlay') || e.touches.length !== 1) return;
+  pull = { y: e.touches[0].clientY, d: 0 };
+}, { passive: true });
+window.addEventListener('touchmove', (e) => {
+  if (!pull) return;
+  const d = e.touches[0].clientY - pull.y;
+  if (d < 0 || window.scrollY > 0) { pull = null; ptr.style.transform = ''; return; }
+  pull.d = Math.min(d * 0.45, 96);
+  ptr.style.transform = `translate(-50%, ${pull.d}px) rotate(${pull.d * 3}deg)`;
+  ptr.classList.toggle('ready', pull.d > 64);
+}, { passive: true });
+window.addEventListener('touchend', () => {
+  if (!pull) return;
+  const go2 = pull.d > 64;
+  pull = null;
+  if (go2) { ptr.style.transform = 'translate(-50%, 64px)'; pullRefresh(); } else { ptr.style.transform = ''; ptr.classList.remove('ready'); }
+});
+
 // ---------------------------------------------------------------- events
+
+async function busy(el, label, fn) {
+  el.disabled = true;
+  el.classList.add('working');
+  const was = el.innerHTML;
+  if (label) el.textContent = label;
+  try { return await fn(); } finally { el.disabled = false; el.classList.remove('working'); el.innerHTML = was; }
+}
+
+async function markDone(el) {
+  const { id, title } = el.dataset;
+  state.hidden.add(id);
+  const row = el.closest('li');
+  row?.classList.add('leaving');
+  setTimeout(() => draw(), reducedMotion() ? 0 : 200);
+  try {
+    await ai.markDone(id);
+    toast(`Done: ${title}`, { action: 'Undo', onAction: async () => {
+      state.hidden.delete(id);
+      draw();
+      try { await ai.markUndone(id); toast('Put back'); } catch (err) { toast(`Couldn't undo: ${err.message}`); }
+    } });
+  } catch (err) {
+    state.hidden.delete(id);
+    draw();
+    toast(`Couldn't mark it done: ${err.message}`);
+  }
+}
 
 document.addEventListener('click', async (e) => {
   // links inside rendered markdown that point at repo files (they have no data-action)
@@ -393,50 +662,63 @@ document.addEventListener('click', async (e) => {
   if (link && !link.dataset.action) {
     e.preventDefault();
     const base = link.closest('.body')?.dataset.base || '';
-    openFile(resolvePath(base, link.dataset.path));
+    openFile(resolvePath(base, link.dataset.path), link.textContent);
     return;
   }
+  if (e.target.classList?.contains('overlay')) { closeTop(); return; } // tap outside a sheet
   const el = e.target.closest('[data-action]');
   if (!el || el.tagName === 'FORM' || el.tagName === 'SELECT') return;
   const a = el.dataset.action;
-  if (a === 'tab') { state.tab = el.dataset.tab; localStorage.setItem('tab', state.tab); draw(); }
-  else if (a === 'uniTab') { state.uniTab = el.dataset.k; localStorage.setItem('uniTab', state.uniTab); draw(); }
-  else if (a === 'mailTab') { state.mailTab = el.dataset.k; draw(); }
-  else if (a === 'open') { e.preventDefault(); openFile(el.dataset.path); }
-  else if (a === 'close') el.closest('.overlay').remove();
+  if (a === 'tab') go(el.dataset.tab);
+  else if (a === 'uniTab' || a === 'mailTab') {
+    if (a === 'uniTab') { state.uniTab = el.dataset.k; localStorage.setItem('uniTab', state.uniTab); } else state.mailTab = el.dataset.k;
+    draw();
+    const pane = $('.pane');
+    if (pane && !reducedMotion()) pane.classList.add('enter');
+    el.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  } else if (a === 'open') { e.preventDefault(); openFile(el.dataset.path, el.dataset.title); }
+  else if (a === 'close') closeTop();
   else if (a === 'jump') {
     e.preventDefault();
-    const target = document.getElementById(el.dataset.id);
-    target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  } else if (a === 'totop') el.closest('.sheet')?.scrollTo({ top: 0, behavior: 'smooth' });
+    document.getElementById(el.dataset.id)?.scrollIntoView({ behavior: reducedMotion() ? 'auto' : 'smooth', block: 'start' });
+  } else if (a === 'totop') el.closest('.sheet')?.scrollTo({ top: 0, behavior: reducedMotion() ? 'auto' : 'smooth' });
   else if (a === 'delegate') delegateDialog(JSON.parse(el.dataset.task));
-  else if (a === 'refresh') refresh();
-  else if (a === 'download') {
-    const body = el.closest('.body');
+  else if (a === 'refresh') {
+    const got = await busy(el, el.closest('.note') ? 'Retrying…' : null, refresh);
+    if (got) toast(got.status === 'ok' ? (got.changed ? 'Updated' : 'Already up to date') : got.status === 'offline' ? 'Still offline' : "Couldn't refresh");
+  } else if (a === 'download') {
+    const body = el.closest('.sheet').querySelector('.body');
     const blob = new Blob([body.dataset.text || body.innerText], { type: 'text/plain' });
     Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: el.dataset.name }).click();
+    toast(`Saved ${el.dataset.name}`);
   } else if (a === 'done') {
-    el.disabled = true;
-    try {
-      await ai.markDone(el.dataset.id);
-      el.closest('li').style.opacity = '0.4';
-      el.textContent = 'Done';
-    } catch (err) { alert(err.message); el.disabled = false; }
+    markDone(el);
   } else if (a === 'replan') {
-    el.disabled = true;
-    try { await gh.dispatch('pulse.yml', { plan_now: 'true' }); el.textContent = 'Re-planning… ✓'; } catch (err) { alert(err.message); el.disabled = false; }
+    await busy(el, 'Starting…', async () => {
+      try { await gh.dispatch('pulse.yml', { plan_now: 'true' }); toast('Re-planning the week. The new plan lands in a few minutes.'); }
+      catch (err) { toast(err.message); }
+    });
   } else if (a === 'run') {
-    el.disabled = true;
-    try { await gh.dispatch(el.dataset.wf); el.textContent = 'Started ✓'; } catch (err) { alert(err.message); el.disabled = false; }
+    await busy(el, 'Starting…', async () => {
+      try { await gh.dispatch(el.dataset.wf); toast(`Started: ${el.dataset.label || 'sync'}. About 1 to 5 minutes.`); }
+      catch (err) { toast(err.message); }
+    });
   } else if (a === 'decide') {
     const action = state.pending.find((p) => p.id === el.dataset.id);
     if (!action) return;
-    el.closest('.pending').innerHTML = '<span class="muted">Sending…</span>';
+    const yes = el.dataset.yes === '1';
+    el.closest('.pending').innerHTML = `<span class="muted">${yes ? 'Confirming…' : 'Dismissing…'}</span>`;
     try {
-      await ai.decide(action, el.dataset.yes === '1');
+      await ai.decide(action, yes);
       state.pending = state.pending.filter((p) => p.id !== action.id);
-    } catch (err) { alert(err.message); }
+      localStorage.setItem('pending', JSON.stringify(state.pending));
+      toast(yes ? 'Confirmed. ClickUp updates within a couple of minutes.' : 'Dismissed. Nothing was changed.');
+    } catch (err) { toast(`Couldn't send that: ${err.message}`); }
     draw();
+  } else if (a === 'sync-dot') {
+    const s = state.status.kind;
+    const saved = localStorage.getItem('lastSync');
+    toast(s === 'loading' ? 'Syncing…' : s === 'offline' ? `Offline · saved ${ago(saved)}` : s === 'ok' ? `Synced ${ago(saved)}` : 'Sync problem: see Today', { action: s === 'loading' ? null : 'Sync now', onAction: () => pullRefresh() });
   }
 });
 
@@ -451,31 +733,33 @@ document.addEventListener('toggle', (e) => {
   }
 }, true);
 
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && document.querySelector('.overlay')) closeTop(); });
 
 document.addEventListener('submit', async (e) => {
-  e.preventDefault();
   const form = e.target;
+  if (form.closest('.chatapp')) return; // the chat handles its own forms
+  e.preventDefault();
   const a = form.dataset.action;
   const data = Object.fromEntries(new FormData(form));
   if (a === 'ask') {
     const q = (data.q || '').trim();
     if (!q) return;
-    state.tab = 'chat';
-    localStorage.setItem('tab', 'chat');
-    draw();
+    go('chat');
     chat.ask(q);
   } else if (a === 'savekeys') {
     if (data.ghToken) localStorage.setItem('ghToken', data.ghToken.trim());
     if (data.geminiKey) localStorage.setItem('geminiKey', data.geminiKey.trim());
     const [owner, repo] = (data.repo || '').split('/');
     if (owner && repo) { localStorage.setItem('owner', owner.trim()); localStorage.setItem('repo', repo.trim()); }
-    state.tab = 'today';
-    draw();
+    toast('Saved. Loading your data…');
+    go('today');
     refresh();
   } else if (a === 'delegate-go') {
     const task = JSON.parse(form.dataset.task);
     const progress = $('.progress', form);
-    form.querySelector('button').disabled = true;
+    const btn = form.querySelector('button:not([type=button])');
+    btn.disabled = true;
+    btn.textContent = 'Starting…';
     try {
       const jobId = gh.id();
       const attachments = [];
@@ -486,31 +770,66 @@ document.addEventListener('submit', async (e) => {
       progress.textContent = 'Starting…';
       await ai.queueDelegate({ id: jobId, ...task, instruction: data.instruction, model: /^gemini-/.test(data.model || '') ? data.model : undefined,
                                effort: data.effort, attachments });
-      form.closest('.overlay').remove();
-      state.tab = 'uni'; state.uniTab = 'jobs';
+      closeTop();
+      state.uniTab = 'jobs';
+      dirs = null;
       await loadJobs();
+      go('uni');
       draw();
+      toast('Started. You\'ll get a notification when it\'s done.');
     } catch (err) {
-      progress.textContent = err.message;
-      form.querySelector('button').disabled = false;
+      progress.textContent = `Couldn't start it: ${err.message}`;
+      btn.disabled = false;
+      btn.textContent = 'Start';
     }
   }
 });
 
-document.querySelectorAll('nav.tabs button').forEach((b) => b.addEventListener('click', () => {
-  state.tab = b.dataset.tab; localStorage.setItem('tab', state.tab); draw();
-}));
+document.querySelectorAll('nav.tabs button').forEach((b) => b.addEventListener('click', () => go(b.dataset.tab)));
 
-document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+window.addEventListener('hashchange', () => { if (readRoute()) draw({ enter: true }); });
+window.addEventListener('online', () => refresh());
+window.addEventListener('offline', () => { state.status = { kind: 'offline' }; setDot(); draw(); });
 
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
+let lastShown = Date.now();
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { lastShown = Date.now(); return; }
+  if (Date.now() - lastShown > 30000) refresh(); // not on every quick app switch
+  navigator.serviceWorker?.getRegistration().then((r) => r?.update()).catch(() => {});
+});
 
+// ---------------------------------------------------------------- updates (service worker)
+
+let asked = false;
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js').then((reg) => {
+    const offer = (w) => toast('A new version is ready', { action: 'Reload', sticky: true, onAction: () => { asked = true; w.postMessage('skipWaiting'); } });
+    if (reg.waiting && navigator.serviceWorker.controller) offer(reg.waiting);
+    reg.addEventListener('updatefound', () => {
+      const w = reg.installing;
+      w?.addEventListener('statechange', () => { if (w.state === 'installed' && navigator.serviceWorker.controller) offer(w); });
+    });
+  }).catch(() => {});
+  // Reload only when the person tapped Reload. (A first install also fires
+  // controllerchange; reloading then would load the app twice on first visit.)
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (asked) { asked = false; location.reload(); } });
+}
+
+// ---------------------------------------------------------------- start
+
+readRoute();
 fromCache();
 chat.init({
-  draw, refresh, tab: () => state.tab, data: () => state.data,
+  draw, refresh, tab: () => state.tab, data: () => state.data, go,
   pending: () => state.pending, pendingLoaded: () => state.pendingLoaded,
-  setPending: (list) => { state.pending = list; },
+  setPending: (list) => { state.pending = list; localStorage.setItem('pending', JSON.stringify(list)); },
 });
+setDot(localStorage.getItem('lastSync') ? 'ok' : '');
 draw();
-refresh();
-setInterval(() => { if (!document.hidden && state.tab === 'today') draw(); }, 60000); // keep "now" honest
+// paint what's saved first, then sync: the screen never waits on the network
+requestAnimationFrame(() => setTimeout(refresh, 0));
+// keep "now" honest on Today, but never redraw under someone typing or reading a sheet
+setInterval(() => {
+  if (document.hidden || state.tab !== 'today' || document.querySelector('.overlay') || main.contains(document.activeElement)) return;
+  draw();
+}, 60000);

@@ -53,7 +53,13 @@ export async function models() {
   const rank = (id) => (/-flash$/.test(id) ? 0 : /-pro$/.test(id) ? 1 : /lite/.test(id) ? 2 : 3);
   ok.sort((a, b) => ver(b.id) - ver(a.id) || rank(a.id) - rank(b.id) || a.id.localeCompare(b.id));
   modelCache = ok;
+  try { localStorage.setItem('models', JSON.stringify(ok)); } catch { /* fine */ }
   return ok;
+}
+
+// The last list this device saw, for pickers that should fill instantly.
+export function cachedModels() {
+  try { return JSON.parse(localStorage.getItem('models') || '[]'); } catch { return []; }
 }
 
 export async function defaultModel() {
@@ -163,24 +169,38 @@ export async function queueDelegate({ id, title, instruction, module, source, du
 async function runTool(name, a, ctx) {
   const today = new Date().toISOString().slice(0, 10);
   switch (name) {
+    // Each write below is safe to repeat: an identical note, change or to-do that
+    // is already there is returned instead of being added twice.
     case 'remember': {
       const current = (await gh.readText('memory/notes.md')) || '# What the organiser has learned\n';
+      const known = current.split('\n').map((l) => same(l.replace(/^- \d{4}-\d{2}-\d{2}: /, '')));
+      if (known.includes(same(a.fact))) return { saved: a.fact, note: 'Already in memory; not added again.' };
       await gh.write('memory/notes.md', `${current.trimEnd()}\n- ${today}: ${a.fact}\n`, 'app: remember');
       return { saved: a.fact };
     }
     case 'change_schedule': {
-      const item = { id: gh.id(), title: a.title, start: a.start, end: a.end || null, location: a.location || '',
-                     note: a.note, created: new Date().toISOString(), source: 'chat' };
-      await gh.update('schedule/overrides.json', (list) => [...list, item], [], 'app: schedule change');
-      return { recorded: item };
+      let item = { id: gh.id(), title: a.title, start: a.start, end: a.end || null, location: a.location || '',
+                   note: a.note, created: new Date().toISOString(), source: 'chat' };
+      let existed = false;
+      await gh.update('schedule/overrides.json', (list) => {
+        const dup = list.find((o) => !o.cancelled && same(o.title) === same(a.title) && +new Date(o.start) === +new Date(a.start));
+        if (dup) { item = dup; existed = true; return list; }
+        return [...list, item];
+      }, [], 'app: schedule change');
+      return existed ? { recorded: item, note: 'This change was already recorded; not added again.' } : { recorded: item };
     }
     case 'cancel_schedule_change':
       await gh.update('schedule/overrides.json', (list) => list.map((o) => (o.id === a.id ? { ...o, cancelled: true } : o)), [], 'app: cancel change');
       return { cancelled: a.id };
     case 'add_todo': {
-      const item = { id: gh.id(), title: a.title, due: a.due || null, done: false, created: new Date().toISOString() };
-      await gh.update('schedule/todos.json', (list) => [...list, item], [], 'app: todo');
-      return { added: item };
+      let item = { id: gh.id(), title: a.title, due: a.due || null, done: false, created: new Date().toISOString() };
+      let existed = false;
+      await gh.update('schedule/todos.json', (list) => {
+        const dup = list.find((t) => !t.done && same(t.title) === same(a.title));
+        if (dup) { item = dup; existed = true; return list; }
+        return [...list, item];
+      }, [], 'app: todo');
+      return existed ? { added: item, note: 'Already on the list; not added again.' } : { added: item };
     }
     case 'complete_todo':
       await markDone(a.id);
@@ -229,6 +249,14 @@ async function runTool(name, a, ctx) {
   }
 }
 
+// For "is this the same thing?": case, spacing and trailing punctuation don't count.
+const same = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').replace(/[.!\s]+$/, '').trim();
+
+// Tools that change something. On Regenerate these are not run again: the
+// result from the first time is handed back to the model instead.
+export const EFFECTS = new Set(['remember', 'change_schedule', 'cancel_schedule_change', 'add_todo', 'complete_todo', 'skip_event',
+  'replan', 'propose_clickup_update', 'add_to_calendar', 'delegate']);
+
 // Checkpoints live in the planner's file, so "done" for them is a list of ids;
 // to-dos are the app's own and carry their own flag.
 export async function markDone(id) {
@@ -236,6 +264,15 @@ export async function markDone(id) {
     await gh.update('schedule/done.json', (list) => (list.includes(id) ? list : [...list, id]), [], 'app: checkpoint done');
   } else {
     await gh.update('schedule/todos.json', (list) => list.map((t) => (t.id === id ? { ...t, done: true } : t)), [], 'app: todo done');
+  }
+}
+
+// Undo for markDone.
+export async function markUndone(id) {
+  if (id.startsWith('cp-')) {
+    await gh.update('schedule/done.json', (list) => list.filter((x) => x !== id), [], 'app: checkpoint undone');
+  } else {
+    await gh.update('schedule/todos.json', (list) => list.map((t) => (t.id === id ? { ...t, done: false } : t)), [], 'app: todo undone');
   }
 }
 
@@ -391,7 +428,10 @@ async function* sse(res) {
 // Sends one user turn and runs any tool calls. thread.history is Gemini's own
 // shape and is kept intact. `on` gets: text(full), tool({name,args,result}),
 // model(id, reason). signal stops it; whatever was written so far is kept.
-export async function send(thread, userParts, { model, effort, on = {}, signal } = {}) {
+// reuse: the tool calls a regenerated reply already made ([{name, response}]);
+// a tool with side effects is not run twice, its earlier result is reused.
+export async function send(thread, userParts, { model, effort, on = {}, signal, reuse = [] } = {}) {
+  const spare = reuse.map((r) => ({ ...r }));
   const usable = (await models()).map((m) => m.id);
   if (!usable.includes(model)) model = await defaultModel(); // never send a placeholder or retired name
   const tried = new Set();
@@ -447,7 +487,13 @@ export async function send(thread, userParts, { model, effort, on = {}, signal }
       const { name, args = {} } = p.functionCall;
       on.tool?.({ name, args });
       let result;
-      try { result = await runTool(name, args, ctx); } catch (err) { result = { error: String(err.message || err) }; }
+      const before = EFFECTS.has(name) && spare.find((r) => r.name === name && !r.used);
+      if (before) {
+        before.used = true;
+        result = { ...before.response, note: 'Already done when this reply was first written; not repeated.' };
+      } else {
+        try { result = await runTool(name, args, ctx); } catch (err) { result = { error: String(err.message || err) }; }
+      }
       tools.push({ name, args: { path: args.path, title: args.title || args.task_title || args.task_name } });
       on.tool?.({ name, args, result });
       responses.push({ functionResponse: { name, response: result } });
