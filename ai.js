@@ -9,7 +9,8 @@
 
 import * as gh from './gh.js';
 
-const API = 'https://generativelanguage.googleapis.com/v1beta';
+// geminiBase is a local-testing hook (a mock server); unset in real use.
+const API = localStorage.getItem('geminiBase') || 'https://generativelanguage.googleapis.com/v1beta';
 const TZ = 'Europe/London';
 
 export const settings = {
@@ -19,11 +20,12 @@ export const settings = {
   set effort(v) { localStorage.setItem('effort', v); },
 };
 
-async function call(path, body) {
+async function request(path, body, signal) {
   const res = await fetch(`${API}/${path}`, {
     method: body ? 'POST' : 'GET',
     headers: { 'x-goog-api-key': gh.cfg.geminiKey, 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
+    signal,
   });
   if (!res.ok) {
     const detail = await res.text();
@@ -31,7 +33,11 @@ async function call(path, body) {
     err.status = res.status;
     throw err;
   }
-  return res.json();
+  return res;
+}
+
+async function call(path, body, signal) {
+  return (await request(path, body, signal)).json();
 }
 
 // Models this key can actually use, newest first, Flash before Pro before Lite.
@@ -55,11 +61,42 @@ export async function defaultModel() {
   return all.find((m) => m.id === settings.model)?.id || all.find((m) => /-flash$/.test(m.id))?.id || all[0]?.id;
 }
 
-function fallbackAfter(model, usable) {
-  const family = usable.filter((id) => /^gemini-\d+(\.\d+)?-flash(-lite)?$/.test(id));
-  const tried = fallbackAfter.tried || (fallbackAfter.tried = new Set());
+// Each model has its own free daily quota (TRAPS 3), and one model can be
+// overloaded while another isn't: the next Flash/Lite model not yet tried.
+function nextModel(model, usable, tried) {
   tried.add(model);
-  return family.find((id) => !tried.has(id)) || null;
+  return usable.filter((id) => /^gemini-\d+(\.\d+)?-flash(-lite)?$/.test(id)).find((id) => !tried.has(id)) || null;
+}
+
+// The cheapest model for small jobs (titles, summaries): newest Flash-Lite.
+async function liteModel() {
+  const all = (await models()).map((m) => m.id);
+  return all.find((id) => /-flash-lite$/.test(id)) || all.find((id) => /-flash$/.test(id)) || all[0];
+}
+
+// One short non-streaming call on Flash-Lite, falling through on 429/503.
+async function quick(prompt, maxTokens = 300) {
+  const usable = (await models()).map((m) => m.id);
+  const tried = new Set();
+  let model = await liteModel();
+  while (model) {
+    try {
+      const out = await call(`models/${model}:generateContent`, {
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.2, maxOutputTokens: maxTokens },
+      });
+      return (out.candidates?.[0]?.content?.parts || []).filter((p) => p.text && !p.thought).map((p) => p.text).join('').trim();
+    } catch (err) {
+      if (err.status !== 429 && err.status !== 503) throw err;
+      model = nextModel(model, usable, tried);
+    }
+  }
+  throw new Error('every Gemini model is busy or out of quota');
+}
+
+export async function titleFor(text) {
+  const t = await quick(`Write a title of 2 to 6 words for a chat that starts with the message below. Plain text, no quotes, no full stop.\n\nMessage: ${text.slice(0, 1500)}`, 30);
+  return t.split('\n')[0].replace(/^["'“]|["'”.]$/g, '').slice(0, 60);
 }
 
 function thinking(model, effort) {
@@ -222,14 +259,19 @@ function fmt(iso) {
 
 // ---------------------------------------------------------------- the turn
 
-async function systemText() {
-  const [now, overrides, todos] = await Promise.all([
+async function systemText(thread) {
+  // Read fresh every turn: memory/notes.md, schedule changes and to-dos are what
+  // any chat has just learned; context/now.md is the hourly shared memory.
+  const [now, notes, overrides, todos, others] = await Promise.all([
     gh.readText('context/now.md').catch(() => gh.cachedText('context/now.md')),
+    gh.readText('memory/notes.md').catch(() => gh.cachedText('memory/notes.md')),
     gh.readJSON('schedule/overrides.json', []).catch(() => []),
     gh.readJSON('schedule/todos.json', []).catch(() => []),
+    Promise.resolve(thread?.others || []),
   ]);
   return `You are the organiser inside the user's own app: one assistant with one memory,
 the same one that writes their Today briefing. Who they are is in the memory below.
+They can have several chats; all of them share this memory.
 
 Current time: ${nowLondon()}.
 
@@ -238,6 +280,11 @@ When they report a change (meeting moved, new event, something to remember), use
 to record it, then confirm in one line. ClickUp belongs to their whole group: only ever
 PROPOSE changes there; say they are waiting for their Confirm. If you need detail from a
 lecture, email or file, read it with read_file rather than guessing.
+${thread?.summary ? `\nEARLIER IN THIS CHAT (older turns, summarised):\n${thread.summary}\n` : ''}
+Other recent chats (titles only): ${others.slice(0, 8).map((o) => o.title).join(' · ') || 'none'}
+
+Things learned in chat (memory/notes.md, newest last):
+${(notes || '(nothing yet)').slice(-6000)}
 
 Schedule changes recorded via chat (id, title, start, note):
 ${JSON.stringify(overrides.filter((o) => !o.cancelled).slice(-30))}
@@ -249,57 +296,183 @@ EVERYTHING THE ORGANISER KNOWS RIGHT NOW:
 ${now || '(the shared memory has not been built yet)'}`;
 }
 
-// history: [{role:'user'|'model', parts:[...]}] in Gemini's own shape, kept intact
-// (Gemini 3 needs its thought signatures handed back unchanged).
-export async function send(history, text, { model, effort, onTool } = {}) {
-  fallbackAfter.tried = new Set();
+// ---- keeping a long chat inside the context
+
+const isUserText = (c) => c.role === 'user' && (c.parts || []).some((p) => p.text != null || p.inlineData);
+const BIG_RESULT = 4000;
+
+// Old tool results (a whole lecture read three questions ago) are cut down; the
+// last two user turns keep everything. Returns a new array; the input is untouched.
+export function slim(history) {
+  const starts = history.map((c, i) => (isUserText(c) ? i : -1)).filter((i) => i >= 0);
+  const keepFrom = starts.length >= 2 ? starts[starts.length - 2] : 0;
+  return history.map((c, i) => {
+    if (i >= keepFrom || c.role !== 'user') return c;
+    const parts = c.parts.map((p) => {
+      if (!p.functionResponse) return p;
+      const text = JSON.stringify(p.functionResponse.response);
+      if (text.length <= BIG_RESULT) return p;
+      return { functionResponse: { name: p.functionResponse.name,
+        response: { trimmed: true, note: 'Large result trimmed from an older turn; call the tool again if you need it.', preview: text.slice(0, 1500) } } };
+    });
+    return { ...c, parts };
+  });
+}
+
+// What gets stored in the repo: no inline file data (photos and PDFs go to
+// Gemini with the message they belong to, and aren't kept), old results slimmed.
+export function forStorage(history) {
+  return slim(history).map((c) => (c.parts?.some((p) => p.inlineData)
+    ? { ...c, parts: c.parts.map((p) => (p.inlineData ? { text: `(a ${p.inlineData.mimeType} file was attached here; it was only sent with this message)` } : p)) }
+    : c));
+}
+
+const size = (history) => history.reduce((n, c) => n + (c.parts || []).reduce((m, p) => m + (p.inlineData ? 0 : JSON.stringify(p).length), 0), 0);
+export const LIMITS = { chars: 150000, turns: 30 };
+
+// When a chat gets long, the oldest half is summarised (Flash-Lite) into
+// thread.summary and dropped from what's sent. The messages stay on screen.
+export async function compact(thread) {
+  const starts = thread.history.map((c, i) => (isUserText(c) ? i : -1)).filter((i) => i >= 0);
+  if (size(slim(thread.history)) <= LIMITS.chars && starts.length <= LIMITS.turns) return false;
+  const cut = starts[Math.floor(starts.length / 2)];
+  if (!cut) return false;
+  const old = thread.history.slice(0, cut);
+  const readable = old.map((c) => (c.parts || []).map((p) => (p.text && !p.thought ? `${c.role === 'user' ? 'User' : 'Assistant'}: ${p.text}`
+    : p.functionCall ? `(used ${p.functionCall.name})` : '')).filter(Boolean).join('\n')).filter(Boolean).join('\n').slice(-60000);
+  let summary;
+  try {
+    summary = await quick(`Summarise this earlier part of a chat between a student and their organiser assistant, so the assistant can carry on. Keep facts, decisions, open questions, and anything the student asked to be done. At most 200 words.\n\n${thread.summary ? `Summary of what came before:\n${thread.summary}\n\n` : ''}${readable}`, 600);
+  } catch {
+    summary = `${thread.summary || ''}\n(Earlier turns dropped to save space: ${readable.slice(0, 600)}…)`.trim();
+  }
+  thread.summary = summary;
+  thread.history = thread.history.slice(cut);
+  return true;
+}
+
+// ---- one turn, streamed
+
+// Gemini's stream sends parts in pieces: join neighbouring text, and keep a
+// thought signature on the part it arrived with (Gemini 3 needs them back).
+function mergeParts(parts) {
+  const out = [];
+  for (const p of parts) {
+    const last = out[out.length - 1];
+    if (last && p.text != null && last.text != null && !p.functionCall && !last.functionCall && !!p.thought === !!last.thought
+        && !(last.thoughtSignature && p.text)) {
+      last.text += p.text;
+      if (p.thoughtSignature) last.thoughtSignature = p.thoughtSignature;
+    } else {
+      out.push({ ...p });
+    }
+  }
+  return out.filter((p) => p.functionCall || p.thoughtSignature || p.text);
+}
+
+async function* sse(res) {
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i;
+    while ((i = buf.search(/\r?\n\r?\n/)) >= 0) {
+      const block = buf.slice(0, i);
+      buf = buf.slice(i).replace(/^\r?\n\r?\n/, '');
+      const data = block.split(/\r?\n/).filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trim()).join('');
+      if (data && data !== '[DONE]') yield JSON.parse(data);
+    }
+  }
+}
+
+// Sends one user turn and runs any tool calls. thread.history is Gemini's own
+// shape and is kept intact. `on` gets: text(full), tool({name,args,result}),
+// model(id, reason). signal stops it; whatever was written so far is kept.
+export async function send(thread, userParts, { model, effort, on = {}, signal } = {}) {
   const usable = (await models()).map((m) => m.id);
   if (!usable.includes(model)) model = await defaultModel(); // never send a placeholder or retired name
+  const tried = new Set();
   const ctx = { proposed: [], model, effort };
-  const contents = [...history, { role: 'user', parts: [{ text }] }];
-  const body = () => ({
-    systemInstruction: { parts: [{ text: sys }] },
-    contents,
-    tools: [{ functionDeclarations: TOOLS }],
-    generationConfig: { temperature: 0.4, thinkingConfig: thinking(model, effort) },
-  });
-  const sys = await systemText();
+  await compact(thread);
+  thread.history.push({ role: 'user', parts: userParts });
+  const sys = await systemText(thread);
+  let reply = '';
+  let noThinking = false;
+  const tools = [];
+  on.model?.(model);
   for (let step = 0; step < 6; step++) {
-    let out;
+    const body = () => ({
+      systemInstruction: { parts: [{ text: sys }] },
+      contents: slim(thread.history),
+      tools: [{ functionDeclarations: TOOLS }],
+      generationConfig: noThinking ? { temperature: 0.4 } : { temperature: 0.4, thinkingConfig: thinking(model, effort) },
+    });
+    let parts = [];
+    let busy = 0;
     for (;;) {
+      parts = [];
       try {
-        out = await call(`models/${model}:generateContent`, body());
+        const res = await request(`models/${model}:streamGenerateContent?alt=sse`, body(), signal);
+        for await (const chunk of sse(res)) {
+          const got = chunk.candidates?.[0]?.content?.parts || [];
+          parts.push(...got);
+          const text = got.filter((p) => p.text && !p.thought).map((p) => p.text).join('');
+          if (text) { reply += text; on.text?.(reply); }
+        }
         break;
       } catch (err) {
-        if (err.status === 400 && /thinking/i.test(err.message)) {
-          out = await call(`models/${model}:generateContent`, { ...body(), generationConfig: { temperature: 0.4 } });
-          break;
-        }
-        // Each model has its own free daily quota: on 429 move to the next Flash/Lite model.
-        const next = err.status === 429 && fallbackAfter(model, usable);
+        if (signal?.aborted || err.name === 'AbortError') return finish(true);
+        if (err.status === 400 && /thinking/i.test(err.message) && !noThinking) { noThinking = true; continue; }
+        // 429: this model's daily quota is gone. 503: overloaded; one retry, then move on.
+        if (err.status === 503 && busy++ < 1) { await new Promise((r) => setTimeout(r, 1500)); continue; }
+        const next = (err.status === 429 || err.status === 503) && nextModel(model, usable, tried);
         if (!next) throw err;
-        onTool?.(`switching to ${next} (quota)`);
+        on.model?.(next, `${model} ${err.status === 429 ? 'is out of quota' : 'is overloaded'}`);
         model = next;
         ctx.model = model;
+        busy = 0;
+        if (reply) { reply = ''; on.text?.(''); }
       }
     }
-    const msg = out.candidates?.[0]?.content;
-    if (!msg) throw new Error('Gemini returned nothing (it may have been blocked).');
-    contents.push(msg);
-    const calls = (msg.parts || []).filter((p) => p.functionCall);
-    if (!calls.length) {
-      const reply = (msg.parts || []).filter((p) => p.text && !p.thought).map((p) => p.text).join('');
-      return { history: contents, reply, proposed: ctx.proposed, model };
-    }
+    const msg = { role: 'model', parts: mergeParts(parts) };
+    if (!msg.parts.length) throw new Error('Gemini returned nothing (it may have been blocked).');
+    thread.history.push(msg);
+    const calls = msg.parts.filter((p) => p.functionCall);
+    if (!calls.length) return finish(false);
     const responses = [];
     for (const p of calls) {
-      onTool?.(p.functionCall.name);
+      const { name, args = {} } = p.functionCall;
+      on.tool?.({ name, args });
       let result;
-      try { result = await runTool(p.functionCall.name, p.functionCall.args || {}, ctx); }
-      catch (err) { result = { error: String(err.message || err) }; }
-      responses.push({ functionResponse: { name: p.functionCall.name, response: result } });
+      try { result = await runTool(name, args, ctx); } catch (err) { result = { error: String(err.message || err) }; }
+      tools.push({ name, args: { path: args.path, title: args.title || args.task_title || args.task_name } });
+      on.tool?.({ name, args, result });
+      responses.push({ functionResponse: { name, response: result } });
     }
-    contents.push({ role: 'user', parts: responses });
+    thread.history.push({ role: 'user', parts: responses });
+    if (signal?.aborted) return finish(true);
+    if (reply && !reply.endsWith('\n')) reply += '\n\n';
   }
-  return { history: contents, reply: '(Stopped after several tool steps.)', proposed: ctx.proposed, model };
+  reply += '(Stopped after several tool steps.)';
+  return finish(false);
+
+  function finish(stopped) {
+    const last = thread.history[thread.history.length - 1];
+    if (stopped) {
+      // never leave a call without its answer, or a turn with no reply, in the history
+      if (last?.role === 'model' && last.parts.some((p) => p.functionCall)) thread.history.pop();
+      const tail = thread.history[thread.history.length - 1];
+      if (tail?.role === 'user') thread.history.push({ role: 'model', parts: [{ text: reply || '(stopped)' }] });
+    }
+    return { reply: reply.trim(), proposed: ctx.proposed, model, tools, stopped };
+  }
+}
+
+// The user turn (text plus files) that a regenerate or edit starts from.
+export function lastUserTurn(history) {
+  for (let i = history.length - 1; i >= 0; i--) if (isUserText(history[i])) return i;
+  return -1;
 }

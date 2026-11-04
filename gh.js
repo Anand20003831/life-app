@@ -92,6 +92,14 @@ export async function write(path, content, message) {
   throw new Error(`Couldn't write ${path}: it kept changing underneath`);
 }
 
+export async function remove(path, message) {
+  const s = await sha(path);
+  if (!s) return;
+  const res = await fetch(url(path), { method: 'DELETE', headers: headers(), body: JSON.stringify({ message: message || `app: delete ${path}`, sha: s }) });
+  if (!res.ok && res.status !== 404) throw new Error(`GitHub ${res.status} deleting ${path}`);
+  try { localStorage.removeItem(`c:${path}`); } catch { /* fine */ }
+}
+
 // Read-modify-write a JSON file through a function, retrying on conflict.
 export async function update(path, fn, fallback, message) {
   const current = await readJSON(path, fallback);

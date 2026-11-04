@@ -4,6 +4,7 @@
 
 import * as gh from './gh.js';
 import * as ai from './ai.js';
+import * as chat from './chat.js';
 import { render as md, esc } from './md.js';
 
 const TZ = 'Europe/London';
@@ -17,8 +18,7 @@ const state = {
   data: {},
   pending: [],     // proposed actions waiting for Confirm
   jobs: [],        // delegated jobs, queued and finished
-  chat: loadChat(),
-  busy: false,
+  pendingLoaded: false,
 };
 
 // ---------------------------------------------------------------- formatting
@@ -102,6 +102,7 @@ async function loadPending() {
   const files = (await gh.list('inbox/actions')).filter((f) => f.name.endsWith('.json'));
   const all = await Promise.all(files.map((f) => gh.readJSON(f.path, null)));
   state.pending = all.filter((a) => a && a.status === 'proposed');
+  state.pendingLoaded = true;
 }
 
 async function loadJobs() {
@@ -124,13 +125,9 @@ function setStatus(kind, detail = '') {
 function draw() {
   document.querySelectorAll('nav.tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === state.tab));
   if (!gh.configured() && state.tab !== 'settings') { main.innerHTML = setupView(); return; }
-  const view = { today: todayView, uni: uniView, mail: mailView, chat: chatView, settings: settingsView }[state.tab];
+  const view = { today: todayView, uni: uniView, mail: mailView, chat: chat.view, settings: settingsView }[state.tab];
   main.innerHTML = view();
-  if (state.tab === 'chat') {
-    const log = $('#log');
-    if (log) log.scrollTop = log.scrollHeight;
-    fillModels();
-  }
+  if (state.tab === 'chat') chat.mounted(); else chat.unmounted();
 }
 
 function setupView() {
@@ -276,82 +273,6 @@ function mailView() {
       <b>${esc(m.subject)}</b><br><span class="muted">${m.kind === 'direct' ? '✉ ' : ''}${esc(m.from)} · ${dayShort(m.date)}${m.module ? ` · ${esc(m.module)}` : ''}</span></li>`).join('') || '<li class="muted">Nothing here.</li>'}</ul>`;
 }
 
-// ---------------------------------------------------------------- Chat
-
-function loadChat() {
-  try { return JSON.parse(localStorage.getItem('chat') || 'null') || { history: [], shown: [] }; }
-  catch { return { history: [], shown: [] }; }
-}
-
-function saveChat() {
-  // Gemini's own history (with thought signatures) stays on the device, trimmed;
-  // the readable transcript also goes to the repo so the cloud can see it.
-  state.chat.history = state.chat.history.slice(-40);
-  state.chat.shown = state.chat.shown.slice(-200);
-  try { localStorage.setItem('chat', JSON.stringify(state.chat)); } catch { /* full */ }
-}
-
-function chatView() {
-  return `<div class="chat"><div class="chatbar">
-      <select id="model" data-action="model"><option>loading models…</option></select>
-      <select id="effort" data-action="effort">${['low', 'medium', 'high'].map((e) => `<option ${ai.settings.effort === e ? 'selected' : ''}>${e}</option>`).join('')}</select>
-      <button class="ghost" data-action="newchat" title="Start a fresh conversation">New</button></div>
-    <div id="log">${state.chat.shown.map(bubble).join('') || '<p class="muted">Ask anything, or tell it a change: "group meeting moved to Thursday 3pm", "remind me to email my tutor", "make me 10 practice questions on threads".</p>'}
-      ${state.busy ? `<div class="bubble model thinking">${esc(state.busy === true ? 'thinking…' : state.busy)}</div>` : ''}</div>
-    ${state.pending.length ? pendingCard() : ''}
-    <form class="ask" data-action="send"><textarea name="q" rows="2" placeholder="Message" ${state.busy ? 'disabled' : ''}></textarea><button ${state.busy ? 'disabled' : ''}>Send</button></form></div>`;
-}
-
-function bubble(m) {
-  return `<div class="bubble ${m.role}">${m.role === 'model' ? md(m.text || '') : esc(m.text).replace(/\n/g, '<br>')}
-    ${m.tools?.length ? `<div class="muted small">used: ${esc(m.tools.join(', '))}</div>` : ''}</div>`;
-}
-
-async function fillModels() {
-  const sel = $('#model');
-  if (!sel || sel.dataset.filled) return;
-  try {
-    const [all, current] = await Promise.all([ai.models(), ai.defaultModel()]);
-    sel.innerHTML = all.map((m) => `<option value="${esc(m.id)}" ${m.id === current ? 'selected' : ''}>${esc(m.id)}</option>`).join('');
-    sel.dataset.filled = '1';
-    if (current && !ai.settings.model) ai.settings.model = current;
-  } catch (err) {
-    sel.innerHTML = `<option>models unavailable</option>`;
-  }
-}
-
-async function sendChat(text) {
-  // Read the choice from settings, not the <select>: draw() below rebuilds the
-  // select, and mid-rebuild its value is the "loading models…" placeholder.
-  const model = ai.settings.model || undefined;
-  state.chat.shown.push({ role: 'user', text, at: new Date().toISOString() });
-  state.busy = true;
-  draw();
-  const tools = [];
-  try {
-    const out = await ai.send(state.chat.history, text, {
-      model, effort: ai.settings.effort,
-      onTool: (name) => { tools.push(name); state.busy = `using ${name}…`; draw(); },
-    });
-    state.chat.history = out.history;
-    state.chat.shown.push({ role: 'model', text: out.reply, at: new Date().toISOString(), tools, model: out.model });
-    if (out.proposed.length) state.pending.push(...out.proposed);
-  } catch (err) {
-    state.chat.shown.push({ role: 'model', text: `**Couldn't answer:** ${err.message}`, at: new Date().toISOString() });
-  }
-  state.busy = false;
-  saveChat();
-  draw();
-  archiveChat().catch(() => {});
-  if (tools.some((t) => /schedule|todo|remember/.test(t))) refresh();
-}
-
-async function archiveChat() {
-  const month = londonDate().slice(0, 7);
-  const recent = state.chat.shown.slice(-2);
-  await gh.update(`chat/${month}.json`, (log) => [...log, ...recent.map(({ role, text, at, tools, model }) => ({ role, text, at, tools, model }))], [], 'app: chat');
-}
-
 // ---------------------------------------------------------------- Settings
 
 const EXPECT = { 'uni-sync': 13, 'lecture-sync': 13, 'mail-sync': 13, 'calendar-sync': 2, 'clickup-sync': 2, today: 2, planner: 26 };
@@ -490,7 +411,6 @@ document.addEventListener('click', async (e) => {
   } else if (a === 'totop') el.closest('.sheet')?.scrollTo({ top: 0, behavior: 'smooth' });
   else if (a === 'delegate') delegateDialog(JSON.parse(el.dataset.task));
   else if (a === 'refresh') refresh();
-  else if (a === 'newchat') { state.chat = { history: [], shown: [] }; saveChat(); draw(); }
   else if (a === 'download') {
     const body = el.closest('.body');
     const blob = new Blob([body.dataset.text || body.innerText], { type: 'text/plain' });
@@ -531,22 +451,19 @@ document.addEventListener('toggle', (e) => {
   }
 }, true);
 
-document.addEventListener('change', (e) => {
-  if (e.target.id === 'model' && /^gemini-/.test(e.target.value)) ai.settings.model = e.target.value;
-  if (e.target.id === 'effort') ai.settings.effort = e.target.value;
-});
 
 document.addEventListener('submit', async (e) => {
   e.preventDefault();
   const form = e.target;
   const a = form.dataset.action;
   const data = Object.fromEntries(new FormData(form));
-  if (a === 'send' || a === 'ask') {
+  if (a === 'ask') {
     const q = (data.q || '').trim();
-    if (!q || state.busy) return;
+    if (!q) return;
     state.tab = 'chat';
     localStorage.setItem('tab', 'chat');
-    sendChat(q);
+    draw();
+    chat.ask(q);
   } else if (a === 'savekeys') {
     if (data.ghToken) localStorage.setItem('ghToken', data.ghToken.trim());
     if (data.geminiKey) localStorage.setItem('geminiKey', data.geminiKey.trim());
@@ -589,6 +506,11 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) refr
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
 
 fromCache();
+chat.init({
+  draw, refresh, tab: () => state.tab, data: () => state.data,
+  pending: () => state.pending, pendingLoaded: () => state.pendingLoaded,
+  setPending: (list) => { state.pending = list; },
+});
 draw();
 refresh();
 setInterval(() => { if (!document.hidden && state.tab === 'today') draw(); }, 60000); // keep "now" honest
