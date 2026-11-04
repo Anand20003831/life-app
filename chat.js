@@ -9,6 +9,8 @@ import * as gh from './gh.js';
 import * as ai from './ai.js';
 import * as threads from './threads.js';
 import { render as md, esc } from './md.js';
+import { I } from './icons.js';
+import { toast as uiToast } from './ui.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 let app = {};          // hooks from app.js: draw, refresh, pending(), setPending(list), data()
@@ -26,30 +28,9 @@ let renaming = null;
 let deleting = null;
 let modelList = [];
 let listening = null;  // SpeechRecognition while active
-let toastText = '';
 
 const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
 const LIMIT = { total: 12e6, pdf: 9e6, text: 3e5, imageSide: 1600 };
-
-// ---------------------------------------------------------------- icons
-
-const svg = (d, label = '') => `<svg viewBox="0 0 24 24" ${label ? `role="img" aria-label="${label}"` : 'aria-hidden="true"'} fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
-const I = {
-  menu: svg('<path d="M4 7h16M4 12h16M4 17h10"/>'),
-  compose: svg('<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>'),
-  plus: svg('<path d="M12 5v14M5 12h14"/>'),
-  mic: svg('<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>'),
-  send: svg('<path d="M12 19V5M5 12l7-7 7 7"/>'),
-  stop: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/></svg>',
-  copy: svg('<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/>'),
-  retry: svg('<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>'),
-  edit: svg('<path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>'),
-  more: svg('<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>'),
-  pin: svg('<path d="M9 4h6l-1 6 4 4H6l4-4z"/><path d="M12 14v6"/>'),
-  search: svg('<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>'),
-  file: svg('<path d="M14 3H6v18h12V7z"/><path d="M14 3v4h4"/>'),
-  x: svg('<path d="M6 6l12 12M18 6L6 18"/>'),
-};
 
 // ---------------------------------------------------------------- setup
 
@@ -97,18 +78,27 @@ export async function mounted() {
   }
 }
 
-export function unmounted() { document.body.classList.remove('chat-mode'); }
+export function unmounted() { document.body.classList.remove('chat-mode', 'chat-typing'); }
+
+// Back button: closes the drawer if it's open (app.js calls this on popstate).
+export function back() {
+  if (!drawer) return false;
+  drawer = false;
+  paint();
+  return true;
+}
+
+function closeDrawer() {
+  if (!drawer) return;
+  if (history.state?.drawer) history.back(); else back();
+}
 
 function paint() {
   if (app.tab() !== 'chat') return;
   app.draw();
 }
 
-function toast(text) {
-  toastText = text;
-  paint();
-  setTimeout(() => { if (toastText === text) { toastText = ''; paint(); } }, 4000);
-}
+const toast = (text) => uiToast(text);
 
 // ---------------------------------------------------------------- view
 
@@ -121,7 +111,6 @@ export function view() {
       <button class="icon" data-c="new" aria-label="New chat">${I.compose}</button>
     </header>
     <div id="log" class="log" aria-live="polite">${t?.shown.length || live ? messages() : empty()}</div>
-    ${toastText ? `<p class="toast" role="status">${esc(toastText)}</p>` : ''}
     ${composer()}
     ${drawer ? drawerView() : ''}
   </div>`;
@@ -301,7 +290,7 @@ async function userParts(text, attached) {
 }
 
 // One exchange. With `again`, the last user turn is sent again (regenerate).
-async function turn({ text, again = null }) {
+async function turn({ text, again = null, reuse = [] }) {
   if (live) return;
   if (!gh.cfg.geminiKey) { toast('Add a Gemini key in Settings first.'); return; }
   if (!t) {
@@ -329,7 +318,7 @@ async function turn({ text, again = null }) {
   let res;
   try {
     res = await ai.send(t, parts, {
-      model: currentModel(), effort: t.effort || ai.settings.effort, signal: ctrl.signal,
+      model: currentModel(), effort: t.effort || ai.settings.effort, signal: ctrl.signal, reuse,
       on: {
         text: (full) => { live.text = full; liveUpdate(); },
         tool: ({ name, args, result }) => {
@@ -420,6 +409,11 @@ function sizeBox() {
 function rewind() {
   const i = ai.lastUserTurn(t.history);
   const parts = i >= 0 ? t.history[i].parts : t._lastParts;
+  // what the rewound reply's tools returned, so Regenerate doesn't repeat them
+  const done = i >= 0 ? t.history.slice(i + 1).flatMap((c) => (c.role === 'user' ? c.parts : []))
+    .filter((p) => p.functionResponse && !p.functionResponse.response?.error)
+    .map((p) => ({ name: p.functionResponse.name, response: p.functionResponse.response })) : [];
+  t._reuse = done;
   if (i >= 0) t.history = t.history.slice(0, i);
   const u = t.shown.map((m) => m.role).lastIndexOf('user');
   const userMsgShown = t.shown[u];
@@ -505,17 +499,22 @@ async function onClick(e) {
   if (!el || !el.closest('.chatapp') || el.tagName === 'FORM') return;
   const c = el.dataset.c;
   const id = el.dataset.id;
-  if (c === 'drawer') { drawer = true; menuFor = renaming = deleting = null; paint(); }
-  else if (c === 'close-drawer') { drawer = false; paint(); }
+  if (c === 'drawer') {
+    drawer = true; menuFor = renaming = deleting = null;
+    history.pushState({ drawer: true }, '');   // Android back closes it
+    paint();
+    $('#chatsearch')?.focus({ preventScroll: true });
+  } else if (c === 'close-drawer') closeDrawer();
   else if (c === 'new') {
     if (live) return;
-    t = null; files = []; draft = ''; drawer = false;
+    t = null; files = []; draft = '';
+    closeDrawer();
     localStorage.removeItem('chatCurrent');
     paint();
     $('.composer textarea')?.focus();
   } else if (c === 'open') {
     if (live) return;
-    drawer = false;
+    closeDrawer();
     localStorage.setItem('chatCurrent', id);
     t = threads.cached(id) || { ...threads.blank(), id, title: list.find((x) => x.id === id)?.title || 'Chat', titled: true };
     paint();
@@ -549,7 +548,7 @@ async function onClick(e) {
     if (live || !t) return;
     const { parts } = rewind();
     paint();
-    turn({ again: parts });
+    turn({ again: parts, reuse: t._reuse });
   } else if (c === 'edit') {
     if (live || !t) return;
     const { parts, u } = rewind();
@@ -642,5 +641,5 @@ function onKey(e) {
     e.preventDefault();
     e.target.form.requestSubmit();
   }
-  if (e.key === 'Escape' && drawer) { drawer = false; paint(); }
+  if (e.key === 'Escape' && drawer) closeDrawer();
 }
