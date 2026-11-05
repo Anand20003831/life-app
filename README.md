@@ -14,6 +14,7 @@ key that is also stored only on the device.
 | `gh.js` | every read and write to the private data repo; uploads split big files into chunks |
 | `ai.js` | the chat: Gemini with tools, model and effort choice |
 | `md.js` | a small, escaping Markdown renderer |
+| `organise.js` | suggestions (accept / dismiss / edit, press-and-hold for a reason), your choices with an offline outbox, and Mail's "Need to know" |
 | `icons.js` | the one icon set (inline SVG, follows the theme) |
 | `ui.js` | toasts (with Undo) and the reduced-motion check |
 | `sw.js` | offline shell, cache first; bump `CACHE` when any file changes, and the app offers "A new version is ready · Reload" |
@@ -21,6 +22,6 @@ key that is also stored only on the device.
 
 Every screen has a loading state (skeletons), an empty state that says what will appear,
 and a problem state: offline shows the saved copy with when it was saved; an error has Retry.
-Links into the app: `#today`, `#uni/<deadlines|lectures|group|modules|jobs>`, `#mail/<important|forum|noise>`, `#chat`, `#settings`.
+Links into the app: `#today`, `#today/tasks`, `#uni/<deadlines|lectures|group|modules|jobs>`, `#mail/<important|forum|noise>`, `#chat`, `#settings`.
 
 `localStorage.apiBase` points the app at a local mock of the GitHub API for testing. Leave it unset in real use.

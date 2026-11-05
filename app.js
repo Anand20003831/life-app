@@ -12,6 +12,7 @@ import * as chat from './chat.js';
 import { render as md, esc } from './md.js';
 import { I } from './icons.js';
 import { toast, reducedMotion } from './ui.js';
+import * as org from './organise.js';
 
 const TZ = 'Europe/London';
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -32,6 +33,7 @@ const state = {
   hidden: new Set(), // rows marked done this session (optimistic, undoable)
 };
 const scrolls = {};
+const folds = new Set(JSON.parse(localStorage.getItem('folds') || '[]')); // <details data-fold> left open
 
 // ---------------------------------------------------------------- formatting
 
@@ -119,7 +121,8 @@ function statusNote() {
   const retry = `<button class="link" data-action="refresh">Retry</button>`;
   if (s.kind === 'offline') {
     if (!saved) return ''; // nothing to show: the screen's own offline panel says so
-    return `<div class="note" role="status">${I.offline}<span>Offline · showing what was saved ${ago(saved)}</span>${retry}</div>`;
+    const queued = org.pending();
+    return `<div class="note" role="status">${I.offline}<span>Offline · showing what was saved ${ago(saved)}${queued ? ` · ${queued} change${queued > 1 ? 's' : ''} will sync when you're back` : ''}</span>${retry}</div>`;
   }
   if (s.kind === 'error') {
     if (!saved) return ''; // the screen shows the error panel instead
@@ -146,7 +149,8 @@ const FILES = {
   today: 'today.json', deadlines: 'uni/deadlines.json', lectures: 'uni/lectures.json',
   courses: 'uni/courses.json', mail: 'uni/email/index.json', clickup: 'schedule/clickup.json',
   runs: 'state/runs.json', todos: 'schedule/todos.json', calendar: 'schedule/calendar.json', plan: 'schedule/plan.json',
-  skipped: 'schedule/skipped.json',
+  skipped: 'schedule/skipped.json', suggestions: 'schedule/suggestions.json', decisions: 'schedule/decisions.json',
+  ntk: 'uni/email/items.json',
 };
 
 function fromCache() {
@@ -176,6 +180,7 @@ async function refresh() {
     try {
       if (!navigator.onLine) throw new TypeError('offline');
       await gh.checkAccess();
+      await org.flush(); // choices made offline go first, so what's read back includes them
       const got = await Promise.all(Object.entries(FILES).map(async ([k, p]) => [k, await gh.readJSON(p, null)]));
       for (const [k, v] of got) state.data[k] = v;
       await Promise.all([loadPending(), loadJobs()]);
@@ -232,12 +237,13 @@ function readRoute() {
   if (!['today', 'uni', 'mail', 'chat', 'settings'].includes(tab)) return false;
   state.tab = tab;
   if (tab === 'uni' && ['deadlines', 'lectures', 'group', 'modules', 'jobs'].includes(sub)) state.uniTab = sub;
+  if (tab === 'today' && ['day', 'tasks'].includes(sub)) state.todayTab = sub;
   if (tab === 'mail' && ['important', 'forum', 'noise'].includes(sub)) state.mailTab = sub;
   return true;
 }
 
 function writeRoute() {
-  const sub = state.tab === 'uni' ? `/${state.uniTab}` : state.tab === 'mail' ? `/${state.mailTab}` : '';
+  const sub = state.tab === 'uni' ? `/${state.uniTab}` : state.tab === 'mail' ? `/${state.mailTab}` : state.tab === 'today' && state.todayTab === 'tasks' ? '/tasks' : '';
   history.replaceState(history.state, '', `#${state.tab}${sub}`);
 }
 
@@ -251,7 +257,17 @@ function go(tab) {
 }
 
 const drawn = { tab: '', html: '' };
-function draw({ enter = false } = {}) {
+// vt: animate the change with a View Transition (the selected day and the Day/Tasks
+// pill glide to their new place); falls back to a plain redraw.
+function draw({ enter = false, vt = false } = {}) {
+  if (vt && document.startViewTransition && !reducedMotion() && !document.hidden) {
+    document.startViewTransition(() => paint({ enter: false, stagger: true }));
+    return;
+  }
+  paint({ enter, stagger: enter });
+}
+
+function paint({ enter = false, stagger = false } = {}) {
   document.querySelectorAll('nav.tabs button').forEach((b) => {
     b.classList.toggle('on', b.dataset.tab === state.tab);
     if (b.dataset.tab === state.tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
@@ -268,6 +284,8 @@ function draw({ enter = false } = {}) {
   drawn.html = html;
   drawn.tab = state.tab;
   main.innerHTML = html;
+  main.querySelectorAll('details[data-fold]').forEach((d) => { d.open = folds.has(d.dataset.fold); });
+  if (stagger && !reducedMotion()) { main.classList.remove('stagger'); void main.offsetWidth; main.classList.add('stagger'); }
   if (enter && !reducedMotion()) { main.classList.remove('enter'); void main.offsetWidth; main.classList.add('enter'); }
   if (state.tab === 'chat') chat.mounted(); else chat.unmounted();
 }
@@ -327,8 +345,15 @@ function agenda(date) {
     for (const e of t.tomorrow || []) rows.push({ ...e, kind: 'class', mod: moduleOf(e) });
   }
   const blocks = state.data.plan?.blocks || (date === londonDate() ? t.plan_today : date === addDays(londonDate(), 1) ? t.plan_tomorrow : []) || [];
-  for (const b of blocks) if (dayOf(b.start) === date) rows.push({ ...b, kind: `plan ${b.kind || ''}`, plan: true });
+  const decided = org.decisions();
+  for (const b of blocks) {
+    if (dayOf(b.start) !== date) continue;
+    const key = `plan:${dayOf(b.start)}:${(b.title || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)}`;
+    if (decided[key]) continue; // accepted ones show at the chosen time; dismissed ones not at all
+    rows.push({ ...b, kind: `plan ${b.kind || ''}`, plan: true, suggested: true, key });
+  }
   for (const o of t.overrides || []) if (!o.cancelled && dayOf(o.start) === date) rows.push({ ...o, kind: 'override' });
+  rows.push(...acceptedOn(date));
   return rows.sort((a, b) => (a.allDay ? -1 : 0) - (b.allDay ? -1 : 0) || new Date(a.start) - new Date(b.start));
 }
 
@@ -336,11 +361,17 @@ function agenda(date) {
 function dueOn(date) {
   const t = state.data.today || {};
   const seen = new Set();
-  return [...(t.due || []), ...(t.overdue || []), ...(state.data.deadlines || [])]
+  return [...(t.due || []).filter((d) => d.kind !== 'accepted'), ...(state.data.deadlines || []).filter((d) => ['assign', 'quiz', undefined].includes(d.kind))]
     .filter((d) => d.due && dayOf(d.due) === date && !seen.has(d.title) && seen.add(d.title));
 }
 
-const TILE = { class: I.book, personal: I.calendar, override: I.edit, plan: I.sparkle, gym: I.play, due: I.clock };
+// Things he accepted, at the time he chose (this device's latest choices included).
+function acceptedOn(date) {
+  return org.items().filter((r) => r.state === 'accepted' && r.decision?.edit?.start && dayOf(r.decision.edit.start) === date)
+    .map((r) => { const e = r.decision.edit; return { title: e.title, start: e.start, end: new Date(new Date(e.start).getTime() + (e.minutes || 60) * 60000).toISOString(), kind: 'accepted', key: r.key }; });
+}
+
+const TILE = { class: I.book, personal: I.calendar, override: I.edit, plan: I.sparkle, gym: I.play, due: I.clock, accepted: I.check };
 function tileFor(r) {
   if (r.kind.startsWith('plan')) return /gym/i.test(r.kind + r.title) ? I.play : I.sparkle;
   if (r.kind === 'class' && /group|project/i.test(r.title)) return I.users;
@@ -363,7 +394,7 @@ function weekStrip(sel) {
       const due = dueOn(d).length;
       return `<button role="tab" aria-selected="${d === sel}" class="day-btn${d === sel ? ' on' : ''}${d === today ? ' today' : ''}${d < today ? ' past' : ''}" data-action="pickday" data-day="${d}"
         aria-label="${dt.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' })}${due ? `, ${due} due` : ''}">
-        <span class="dw">${dt.toLocaleDateString('en-GB', { weekday: 'narrow', timeZone: 'UTC' })}</span><span class="dn">${dt.getUTCDate()}</span>
+        ${d === sel ? '<span class="sel-bg" aria-hidden="true"></span>' : ''}<span class="dw">${dt.toLocaleDateString('en-GB', { weekday: 'narrow', timeZone: 'UTC' })}</span><span class="dn">${dt.getUTCDate()}</span>
         <span class="dots">${has ? '<i></i>' : ''}${due ? '<i class="due"></i>' : ''}</span></button>`;
     }).join('')}</div></div>`;
 }
@@ -401,28 +432,18 @@ function focusCard(t) {
       ${changes.length ? `<p class="small"><b>Timetable changes</b></p><ul class="plainlist small">${changes.map((c) => `<li>${esc(c.text)}</li>`).join('')}</ul>` : ''}</div></details>`;
 }
 
-// Everything with a date that's open, soonest first: the Tasks tab and the "needs you" strip.
-function openTasks() {
-  const t = state.data.today || {};
-  const now = Date.now();
-  const cps = (t.checkpoints || []).map((cp) => ({ ...cp, source: 'checkpoint', group: 'Checkpoints' }));
-  // anything past its date is overdue, whichever list it came from (newest first)
-  const dated = [...(t.overdue || []), ...(t.due || [])].map((d) => ({ ...d, group: new Date(d.due) < now ? 'Overdue' : 'Due in the next 7 days' }));
-  const over = dated.filter((d) => d.group === 'Overdue').sort((a, b) => new Date(b.due) - new Date(a.due));
-  const due = dated.filter((d) => d.group !== 'Overdue').sort((a, b) => new Date(a.due) - new Date(b.due));
-  return [...over, ...cps, ...due].filter((d) => !state.hidden.has(d.id));
+// Real deadlines (Moodle, ClickUp key dates), soonest first.
+function realDeadlines() {
+  return ((state.data.today || {}).due || []).filter((d) => d.kind !== 'accepted');
 }
 
 function taskRow(d) {
-  const doneable = d.source === 'todo' || d.source === 'checkpoint';
   const soon = new Date(d.due) - Date.now() < 3 * 864e5;
-  const meta = [d.source === 'checkpoint' ? `for ${d.for}` : null, d.source === 'clickup' ? (d.mine === false ? 'team' : 'yours') : null,
-    when(d.due)].filter(Boolean).join(' · ');
+  const meta = [d.source === 'clickup' ? (d.mine === false ? 'team' : 'yours') : d.source === 'moodle' ? 'Moodle' : null, when(d.due)].filter(Boolean).join(' · ');
   return `<li class="trow" data-row="${esc(d.id || '')}">
     <button class="trow-main" data-action="expand" aria-expanded="false">
       <span class="trow-title">${esc(d.title)}</span>
-      <span class="trow-meta">${chip(d.module)}<span class="when${soon ? ' soon' : ''}">${until(d.due)}</span><span class="muted">· ${esc(meta)}</span></span></button>
-    ${doneable ? `<button class="tick" data-action="done" data-id="${esc(d.id)}" data-title="${esc(d.title)}" aria-label="Mark done: ${esc(d.title)}">${I.check}</button>` : ''}
+      <span class="trow-meta">${chip(d.module)}<span class="when${soon ? ' soon' : ''}">${until(d.due)}</span>${d.moved ? '<span class="tag">moved by email</span>' : ''}<span class="muted">· ${esc(meta)}</span></span></button>
     <div class="trow-acts">${d.url ? `<a class="btn ghost sm" href="${esc(d.url)}" target="_blank" rel="noopener">${I.open}Open</a>` : ''}
       <button class="ghost sm" data-action="delegate" data-task='${esc(JSON.stringify({ title: d.title, source: d.source, module: d.module, due: d.due, url: d.url }))}'>${I.delegate}Delegate</button></div></li>`;
 }
@@ -430,7 +451,18 @@ function taskRow(d) {
 function taskCard(title, items, cls = '') {
   const rows = items.filter((d) => !state.hidden.has(d.id));
   if (!rows.length) return '';
-  return `<section class="card ${cls}"><h3>${title} <span class="count">${rows.length}</span></h3><ul class="trows">${rows.map(taskRow).join('')}</ul></section>`;
+  return `<section class="card tight ${cls}"><h3>${title} <span class="count">${rows.length}</span></h3><ul class="trows">${rows.map(taskRow).join('')}</ul></section>`;
+}
+
+function tasksPane() {
+  const all = org.items();
+  const by = (g) => all.filter((r) => r.group === g);
+  const body = taskCard('Deadlines', realDeadlines())
+    + org.section('Missed: still doing this?', by('missed'), { cls: 'warn', note: 'More than 3 days past their date. Tick to plan it again, or dismiss it.' })
+    + org.section('Suggestions', by('suggested'), { note: 'Not in your calendar until you tick one. Tap ✕ to dismiss; hold it to give a reason.' })
+    + org.section('Accepted', by('accepted'))
+    + org.section('Dismissed', by('dismissed'), { collapsed: true, fold: 'dismissed' });
+  return body || empty(I.check, 'All clear', 'No deadlines in the next 7 days and nothing waiting for a decision.');
 }
 
 function pendingCard() {
@@ -451,18 +483,16 @@ function todayView() {
       'The hourly job builds it from your timetable, deadlines and email.', `<button data-action="run" data-wf="pulse.yml" data-label="Today">Build it now</button>`));
   }
   parts.push(staleNote(t));
-  const tasks = openTasks();
-  const urgent = tasks.filter((d) => d.group === 'Overdue' || d.source === 'checkpoint' || new Date(d.due) - Date.now() < 2 * 864e5).length;
+  const sugg = org.items();
+  const open = sugg.filter((r) => r.group === 'missed' || r.group === 'suggested');
+  const tasks = [...realDeadlines(), ...open];
+  const urgent = sugg.some((r) => r.group === 'missed') || realDeadlines().some((d) => new Date(d.due) - Date.now() < 2 * 864e5);
   parts.push(`<div class="seg pill" role="tablist" aria-label="Today">
-    <button role="tab" aria-selected="${state.todayTab !== 'tasks'}" class="${state.todayTab !== 'tasks' ? 'on' : ''}" data-action="todayTab" data-k="day">Day</button>
-    <button role="tab" aria-selected="${state.todayTab === 'tasks'}" class="${state.todayTab === 'tasks' ? 'on' : ''}" data-action="todayTab" data-k="tasks">Tasks${tasks.length ? ` <span class="badge${urgent ? ' hot' : ''}">${tasks.length}</span>` : ''}</button></div>`);
+    <button role="tab" aria-selected="${state.todayTab !== 'tasks'}" class="${state.todayTab !== 'tasks' ? 'on' : ''}" data-action="todayTab" data-k="day">${state.todayTab !== 'tasks' ? '<span class="pill-bg" aria-hidden="true"></span>' : ''}<span class="lbl">Day</span></button>
+    <button role="tab" aria-selected="${state.todayTab === 'tasks'}" class="${state.todayTab === 'tasks' ? 'on' : ''}" data-action="todayTab" data-k="tasks">${state.todayTab === 'tasks' ? '<span class="pill-bg" aria-hidden="true"></span>' : ''}<span class="lbl">Tasks</span>${tasks.length ? ` <span class="badge${urgent ? ' hot' : ''}">${tasks.length}</span>` : ''}</button></div>`);
   if (state.pending.length) parts.push(pendingCard());
 
-  if (state.todayTab === 'tasks') {
-    const by = (g) => tasks.filter((d) => d.group === g);
-    const body = taskCard('Overdue', by('Overdue'), 'warn') + taskCard('Checkpoints', by('Checkpoints')) + taskCard('Due in the next 7 days', by('Due in the next 7 days'));
-    return parts.join('') + `<div class="pane">${body || empty(I.check, 'All clear', 'Nothing overdue and nothing due in the next 7 days.')}</div>`;
-  }
+  if (state.todayTab === 'tasks') return parts.join('') + `<div class="pane">${tasksPane()}</div>`;
 
   const rows = agenda(sel);
   const due = dueOn(sel);
@@ -470,13 +500,16 @@ function todayView() {
   const day = [weekStrip(sel)];
   if (isToday) {
     day.push(heroCard(rows), focusCard(t));
-    // what's coming in the next 48 hours first, then the most recently missed
-    const soon = tasks.filter((d) => new Date(d.due) >= now && new Date(d.due) - now < 2 * 864e5).sort((a, b) => new Date(a.due) - new Date(b.due));
-    const missed = tasks.filter((d) => new Date(d.due) < now).sort((a, b) => new Date(b.due) - new Date(a.due));
-    const needs = [...soon, ...missed].slice(0, 3);
-    if (needs.length) {
+    // real deadlines in the next 48 hours, then suggestions due soon (with tick / dismiss)
+    const soonD = realDeadlines().filter((d) => new Date(d.due) - now < 2 * 864e5);
+    const soonS = open.filter((r) => r.group === 'suggested' && r.source !== 'plan' && r.due && new Date(r.due) - now < 2 * 864e5);
+    const missedN = sugg.filter((r) => r.group === 'missed').length;
+    const take = Math.max(0, 3 - soonD.length);
+    if (soonD.length || soonS.length || missedN) {
       day.push(`<section class="card tight"><h3>Needs you <button class="link" data-action="todayTab" data-k="tasks">All tasks (${tasks.length})</button></h3>
-        <ul class="trows">${needs.map(taskRow).join('')}</ul></section>`);
+        ${soonD.length ? `<ul class="trows">${soonD.slice(0, 3).map(taskRow).join('')}</ul>` : ''}
+        ${soonS.length && take ? `<ul class="srows">${soonS.slice(0, take).map(org.row).join('')}</ul>` : ''}
+        ${missedN ? `<button class="missed-link" data-action="todayTab" data-k="tasks">${I.clock}<span>${missedN} missed: still doing ${missedN > 1 ? 'these' : 'this'}?</span>${I.chevR}</button>` : ''}</section>`);
     }
   }
   // on today, only deadlines still ahead (the missed ones are in Needs you / Tasks)
@@ -486,8 +519,8 @@ function todayView() {
   day.push(`<section class="card tight"><h3>${label}</h3>${list.length ? `<ol class="agenda">${list.map((r) => {
     const live = isToday && !r.allDay && !r.dueItem && new Date(r.start) <= now && now < new Date(r.end || r.start);
     const past = isToday && !r.allDay && new Date(r.end || r.start) < now;
-    const sub = r.dueItem ? 'Due' : [r.location ? shortRoom(r.location) : '', r.note ? `changed: ${r.note}` : ''].filter(Boolean).join(' · ');
-    return `<li class="ag ${r.kind}${rail(r.mod)}${live ? ' live' : ''}${past ? ' past' : ''}">
+    const sub = r.dueItem ? 'Due' : r.kind === 'accepted' ? 'Accepted' : r.suggested ? 'Suggested · not in your calendar' : [r.location ? shortRoom(r.location) : '', r.note ? `changed: ${r.note}` : ''].filter(Boolean).join(' · ');
+    return `<li class="ag ${r.kind}${r.suggested ? ' suggested' : ''}${rail(r.mod)}${live ? ' live' : ''}${past ? ' past' : ''}">
       <time>${r.allDay ? 'all day' : time(r.start)}${r.end && !r.allDay && !r.dueItem && dayOf(r.end) === dayOf(r.start) ? `<span>${time(r.end)}</span>` : ''}</time>
       <span class="tile">${r.dueItem ? I.clock : tileFor(r)}</span>
       <span class="ag-text"><b>${esc(r.title)}</b><span class="ag-meta">${chip(r.mod)}${sub ? `<span>${esc(sub)}</span>` : ''}${live ? '<span class="now">now</span>' : ''}</span>
@@ -528,16 +561,25 @@ function lecturesPane() {
     <span class="p">${esc(l.tldr || 'Notes are written at the next sync.')}</span></button></li>`).join('')}</ul>`;
 }
 
+// ClickUp tasks as suggestions (tick / dismiss), key dates as deadlines.
+function clickupItems() {
+  return (state.data.clickup?.tasks || []).filter((t) => !t.done && !/key dates/i.test(t.list || ''))
+    .map((t) => ({ key: `clickup:${t.id}`, source: 'clickup', title: t.name, due: t.due, url: t.url, task_id: t.id,
+                   assignees: t.assignees || [], list: t.list, module: 'COMP2002', mine: t.mine }));
+}
+
 function groupPane() {
   if (!state.data.clickup) return empty(I.users, "ClickUp isn't linked yet", 'Once the ClickUp token is set, the group board shows here (Settings → Health).');
-  const tasks = (state.data.clickup?.tasks || []).filter((t) => !t.done);
-  const row = (t) => `<li><div class="task-text"><b>${esc(t.name)}</b><span class="muted small">${esc(t.list || '')} · ${esc(t.status || '')}${t.due ? ` · ${when(t.due)}` : ''}${t.assignees?.length ? ` · ${esc(t.assignees.join(', '))}` : ''}</span></div>
-    <div class="task-acts"><a class="btn ghost sm" href="${esc(t.url)}" target="_blank" rel="noopener">${I.open}Open</a>
-    <button class="ghost sm" data-action="delegate" data-task='${esc(JSON.stringify({ title: t.name, source: 'clickup', module: 'COMP2002', due: t.due, url: t.url, description: t.description }))}'>${I.delegate}Delegate</button></div></li>`;
-  const mine = tasks.filter((t) => t.mine);
-  const rest = tasks.filter((t) => !t.mine);
-  return `<section class="card"><h3>Yours</h3>${mine.length ? `<ul class="tasks">${mine.map(row).join('')}</ul>` : '<p class="muted">Nothing assigned to you.</p>'}</section>
-    <section class="card"><h3>Team</h3>${rest.length ? `<ul class="tasks">${rest.map(row).join('')}</ul>` : '<p class="muted">No open team tasks.</p>'}</section>`;
+  const keyDates = (state.data.clickup.tasks || []).filter((t) => !t.done && t.due && /key dates/i.test(t.list || ''))
+    .map((t) => ({ id: t.id, title: t.name, due: t.due, url: t.url, source: 'clickup', module: 'COMP2002', mine: t.mine }));
+  const extra = clickupItems();
+  const all = org.items(extra).filter((r) => r.source === 'clickup');
+  const mineKeys = new Set(extra.filter((t) => t.mine).map((t) => t.key));
+  const live = (r) => r.state !== 'dismissed';
+  return taskCard('Key dates (deadlines)', keyDates)
+    + org.section('Yours', all.filter((r) => mineKeys.has(r.key) && live(r)))
+    + org.section('Team', all.filter((r) => !mineKeys.has(r.key) && live(r)), { note: 'Tick one to put it in your own calendar.' })
+    + org.section('Dismissed', all.filter((r) => r.state === 'dismissed'), { collapsed: true, fold: 'group-dismissed' });
 }
 
 function modulesPane() {
@@ -566,15 +608,17 @@ function mailView() {
   const tabs = [['important', 'Important'], ['forum', 'Forum'], ['noise', 'Filtered']];
   const pick = { important: ['direct', 'person'], forum: ['forum'], noise: ['noise', 'secret', 'reminder', 'sent'] }[state.mailTab];
   const seg = `<div class="seg" role="tablist" aria-label="Mail">${tabs.map(([k, l]) => `<button role="tab" aria-selected="${state.mailTab === k}" class="${state.mailTab === k ? 'on' : ''}" data-action="mailTab" data-k="${k}">${l}</button>`).join('')}</div>`;
-  if (state.data.mail == null && firstLoad()) return statusNote() + seg + skeleton('list', 5);
-  if (state.data.mail == null && blocked()) return statusNote() + seg + blocked();
+  if (state.data.mail == null && firstLoad()) return statusNote() + skeleton('list', 5);
+  if (state.data.mail == null && blocked()) return statusNote() + blocked();
   const items = (state.data.mail || []).filter((m) => pick.includes(m.kind));
   const none = { important: ['No important mail', 'Emails sent to you directly, and from staff, show here.'],
                  forum: ['No forum posts', 'Moodle forum questions and answers show here.'],
                  noise: ['Nothing filtered', 'Newsletters, reminders and sign-in codes are kept out of the way here (codes are never stored).'] }[state.mailTab];
-  return statusNote() + seg + `<div class="pane">${items.length ? `<ul class="list">${items.map((m) => `<li>${m.path ? `<button class="li-btn" data-action="open" data-path="${esc(m.path)}" data-title="${esc(m.subject)}">` : '<div class="li-btn static">'}
+  const raw = `<div class="pane">${items.length ? `<ul class="list">${items.map((m) => `<li>${m.path ? `<button class="li-btn" data-action="open" data-path="${esc(m.path)}" data-title="${esc(m.subject)}">` : '<div class="li-btn static">'}
       <b>${esc(m.subject)}</b><span class="muted small">${m.kind === 'direct' ? 'To you · ' : ''}${esc(m.from)} · ${dayShort(m.date)}${m.module ? ` · ${esc(m.module)}` : ''}</span>${m.path ? '</button>' : '</div>'}</li>`).join('')}</ul>`
     : empty(I.mail, none[0], none[1])}</div>`;
+  return statusNote() + org.needToKnow(state.data.ntk || [])
+    + `<details class="card tight fold all-mail" data-fold="all-mail"><summary><h3>All emails <span class="count">${(state.data.mail || []).length}</span></h3><span class="chev">${I.chevD}</span></summary>${seg}${raw}</details>`;
 }
 
 // ---------------------------------------------------------------- Settings
@@ -835,17 +879,35 @@ document.addEventListener('click', async (e) => {
   if (a === 'tab') go(el.dataset.tab);
   else if (a === 'todayTab') {
     state.todayTab = el.dataset.k; localStorage.setItem('todayTab', state.todayTab);
-    draw();
+    draw({ vt: true });
     if (!reducedMotion()) $('.pane')?.classList.add('enter');
     if (el.closest('.card')) window.scrollTo({ top: 0, behavior: reducedMotion() ? 'auto' : 'smooth' });
   } else if (a === 'pickday') {
     state.day = el.dataset.day === londonDate() ? null : el.dataset.day;
-    draw();
+    draw({ vt: true });
   } else if (a === 'week') {
     state.week = Math.max(0, Math.min(1, (state.week || 0) + +el.dataset.d));
     const monday = addDays(londonDate(), -((new Date(`${londonDate()}T12:00:00Z`).getUTCDay() + 6) % 7));
     state.day = state.week ? addDays(monday, 7) : null;
-    draw();
+    draw({ vt: true });
+  } else if (a === 'accept-item' || a === 'edit-item') {
+    const item = findItem(el.dataset.key);
+    if (!item) return;
+    if (a === 'accept-item' && !reducedMotion()) el.classList.add('pop');
+    org.editSheet(item);
+  } else if (a === 'dismiss-item') {
+    if (holdFired) { holdFired = false; return; } // a long press already opened the reason sheet
+    const item = findItem(el.dataset.key);
+    if (!item) return;
+    org.dismiss(item);
+    afterChange(item.key, 'dismissed');
+    toast(`Dismissed: ${short(item.title)}`, { action: 'Undo', onAction: () => { org.restore(item); draw(); toast('Back in suggestions'); } });
+  } else if (a === 'restore-item') {
+    const item = findItem(el.dataset.key);
+    if (!item) return;
+    org.restore(item);
+    afterChange(item.key, 'restored');
+    toast('Back in suggestions');
   } else if (a === 'expand') {
     const row = el.closest('.trow');
     const open = row.classList.toggle('open');
@@ -901,6 +963,50 @@ document.addEventListener('click', async (e) => {
     toast(s === 'loading' ? 'Syncing…' : s === 'offline' ? `Offline · saved ${ago(saved)}` : s === 'ok' ? `Synced ${ago(saved)}` : 'Sync problem: see Today', { action: s === 'loading' ? null : 'Sync now', onAction: () => pullRefresh() });
   }
 });
+
+// ---- suggestions: find, animate away, press and hold
+
+const short = (t, n = 40) => (t.length > n ? `${t.slice(0, n - 1).trimEnd()}…` : t);
+
+function findItem(key) {
+  return org.items(clickupItems()).find((r) => r.key === key);
+}
+
+// The row slides away and the list closes up; then everything redraws.
+function afterChange(key, kind) {
+  const rows = [...main.querySelectorAll(`.srow[data-key="${CSS.escape(key)}"]`)];
+  if (!rows.length || reducedMotion()) { draw(); return; }
+  for (const row of rows) {
+    row.style.height = `${row.offsetHeight}px`;
+    row.classList.add(kind === 'accepted' ? 'out-accept' : 'out-dismiss');
+    requestAnimationFrame(() => row.classList.add('collapsing'));
+  }
+  setTimeout(() => draw(), 340);
+}
+
+let holdFired = false;
+document.addEventListener('pointerdown', (e) => {
+  const el = e.target.closest('[data-action=dismiss-item]');
+  if (!el) return;
+  holdFired = false;
+  org.holdStart(el, () => { holdFired = true; const item = findItem(el.dataset.key); if (item) org.dismissSheet(item); });
+});
+['pointerup', 'pointercancel', 'pointerleave'].forEach((t) => document.addEventListener(t, (e) => {
+  if (e.type === 'pointerleave' && !e.target.closest?.('[data-action=dismiss-item]')) return;
+  org.holdCancel();
+}, true));
+document.addEventListener('contextmenu', (e) => { if (e.target.closest('.sact')) e.preventDefault(); }); // long press = hold, not a menu
+document.addEventListener('keydown', (e) => { // keyboard: Shift+Enter on ✕ asks for a reason
+  const el = e.target.closest?.('[data-action=dismiss-item]');
+  if (el && e.key === 'Enter' && e.shiftKey) { e.preventDefault(); const item = findItem(el.dataset.key); if (item) org.dismissSheet(item); }
+});
+
+document.addEventListener('toggle', (e) => {
+  const d = e.target;
+  if (!d.dataset?.fold) return;
+  if (d.open) folds.add(d.dataset.fold); else folds.delete(d.dataset.fold);
+  try { localStorage.setItem('folds', JSON.stringify([...folds])); } catch { /* fine */ }
+}, true);
 
 // Render a lecture transcript the first time it's opened.
 document.addEventListener('toggle', (e) => {
@@ -999,6 +1105,11 @@ if ('serviceWorker' in navigator) {
 
 readRoute();
 fromCache();
+org.init({
+  esc, chip, when, until, dayShort, time, I, toast, overlay, closeTop, draw, afterChange,
+  data: () => state.data, reducedMotion,
+  markDone: (id) => id && ai.markDone(id).catch(() => {}),
+});
 chat.init({
   draw, refresh, tab: () => state.tab, data: () => state.data, go,
   pending: () => state.pending, pendingLoaded: () => state.pendingLoaded,
