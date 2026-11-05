@@ -10,13 +10,19 @@ key that is also stored only on the device.
 
 | File | Does |
 |---|---|
-| `app.js` | the screens: Today, Uni, Mail, Chat, Settings, plus the reader and Delegate dialog |
+| `app.js` | wires taps, forms and keys to everything below, and starts the app |
+| `store.js` | what the app knows (`state`), and syncing it with the data repo |
+| `shell.js` | which screen shows, the address (`#today`, …), drawing (keeps focus across redraws) |
+| `today.js`, `uni.js`, `mail.js`, `settings.js` | the screens; `settings.js` also has Health and the first-run walk-through |
+| `format.js`, `parts.js` | dates, times and module colours; pieces every screen shares |
+| `sheets.js`, `gestures.js` | the reader and Delegate sheets (focus kept inside); pull to refresh and swipe |
+| `chat.js`, `threads.js` | the chat screen and saved chats |
 | `gh.js` | every read and write to the private data repo; uploads split big files into chunks |
 | `ai.js` | the chat: Gemini with tools, model and effort choice |
 | `md.js` | a small, escaping Markdown renderer |
 | `organise.js` | suggestions (accept / dismiss / edit, press-and-hold for a reason), your choices with an offline outbox, and Mail's "Need to know" |
 | `icons.js` | the one icon set (inline SVG, follows the theme) |
-| `ui.js` | toasts (with Undo) and the reduced-motion check |
+| `ui.js` | toasts (with Undo), haptics and the reduced-motion check |
 | `sw.js` | offline shell, cache first; bump `CACHE` when any file changes, and the app offers "A new version is ready · Reload" |
 | `offline.html` | shown only if the app itself can't load with no signal |
 
@@ -24,4 +30,6 @@ Every screen has a loading state (skeletons), an empty state that says what will
 and a problem state: offline shows the saved copy with when it was saved; an error has Retry.
 Links into the app: `#today`, `#today/tasks`, `#uni/<deadlines|lectures|group|modules|jobs>`, `#mail/<important|forum|noise>`, `#chat`, `#settings`.
 
-`localStorage.apiBase` points the app at a local mock of the GitHub API for testing. Leave it unset in real use.
+`localStorage.apiBase` and `geminiBase` point the app at a local mock for testing. They are ignored unless they
+point at localhost, and the page's Content Security Policy allows only GitHub's API and Gemini, so keys can't be
+sent anywhere else.
