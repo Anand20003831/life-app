@@ -319,7 +319,7 @@ export function dismissSheet(item) {
   const ov = overlay(`<form class="stack dismiss-form">
       <p class="lead"><b>${esc(item.title)}</b></p>
       <div class="chips" role="group" aria-label="Quick reasons">${REASONS.map((r) => `<button type="button" class="chipbtn" data-reason="${esc(r)}">${esc(r)}</button>`).join('')}</div>
-      <label>Reason <input name="reason" placeholder="e.g. Jem's doing this" maxlength="200" autocomplete="off"></label>
+      <label>Reason <input name="reason" placeholder="e.g. someone else on the team has it" maxlength="200" autocomplete="off"></label>
       ${item.task_id ? `<label class="check"><input type="checkbox" name="comment"><span>Also post this reason as a comment on the ClickUp task<span class="muted small"> · the team will see it</span></span></label>` : ''}
       <div class="row end"><button type="button" class="ghost" data-act="cancel">Cancel</button><button>Dismiss</button></div>
     </form>`, { title: 'Dismiss with a reason' });
