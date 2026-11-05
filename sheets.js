@@ -10,6 +10,7 @@ import { reducedMotion } from './ui.js';
 import { $, classify } from './store.js';
 import { when } from './format.js';
 import { empty, skeleton } from './parts.js';
+import * as offline from './offline.js';
 
 export function overlay(html, { title = '', download = '', full = false } = {}) {
   const el = document.createElement('div');
@@ -61,20 +62,31 @@ export async function openFile(path, title) {
   const name = path.split('/').pop().replace(/\.chunks\.json$/, '');
   // full height from the start, so the sheet doesn't jump when the file arrives
   const ov = overlay(skeleton('text'), { title: title || name.replace(/\.md$/, ''), download: name, full: true });
+  const isLecture = /\/lectures\/[^/]+\.md$/.test(path);
+  const show = (text, cached = false) => {
+    const sheet = ov.body.closest('.sheet');
+    const y = sheet?.scrollTop || 0; // the saved copy is replaced by the full one: stay where you were
+    const isMd = /\.md$/.test(path.replace(/\.chunks\.json$/, ''));
+    if (isLecture) {
+      ov.body.innerHTML = lectureView(text, { cached });
+      ov.body.dataset.transcript = text.split(/\n## Transcript\s*\n/)[1] || '';
+    } else {
+      ov.body.innerHTML = isMd ? `<article class="md">${md(text)}</article>` : `<pre class="file">${esc(text)}</pre>`;
+    }
+    ov.body.dataset.base = path.slice(0, path.lastIndexOf('/') + 1);
+    ov.body.dataset.text = text.length < 2e6 ? text : '';
+    if (sheet) sheet.scrollTop = y;
+  };
   const load = async () => {
+    // a lecture saved on this device opens at once, signal or not; the network copy follows
+    const cached = isLecture ? await offline.get(path) : null;
+    if (cached) show(cached, true);
     try {
       const text = await gh.readMaybeChunked(path);
-      if (text == null) { ov.body.innerHTML = empty(I.file, 'Not there yet', 'This file hasn\'t been written yet. It usually appears after the next sync.'); return; }
-      const isMd = /\.md$/.test(path.replace(/\.chunks\.json$/, ''));
-      if (/\/lectures\/[^/]+\.md$/.test(path)) {
-        ov.body.innerHTML = lectureView(text);
-        ov.body.dataset.transcript = text.split(/\n## Transcript\s*\n/)[1] || '';
-      } else {
-        ov.body.innerHTML = isMd ? `<article class="md">${md(text)}</article>` : `<pre class="file">${esc(text)}</pre>`;
-      }
-      ov.body.dataset.base = path.slice(0, path.lastIndexOf('/') + 1);
-      ov.body.dataset.text = text.length < 2e6 ? text : '';
+      if (text == null) { if (!cached) ov.body.innerHTML = empty(I.file, 'Not there yet', 'This file hasn\'t been written yet. It usually appears after the next sync.'); return; }
+      show(text);
     } catch (err) {
+      if (cached) return; // the saved notes stay on screen
       const off = classify(err) === 'offline';
       ov.body.innerHTML = empty(off ? I.offline : I.alert, off ? "Can't open this offline" : "Couldn't open this",
         off ? 'Files are fetched when you open them. Try again when you have signal.' : esc(err.message), '<button class="retry-file">Retry</button>');
@@ -87,7 +99,7 @@ export async function openFile(path, title) {
 // A lecture file: header, notes (or the old summary), then the transcript.
 // The notes get a contents list; the transcript is collapsed and only rendered
 // when opened, since it can be 60k characters.
-function lectureView(text) {
+function lectureView(text, { cached = false } = {}) {
   const [notes, transcript] = text.split(/\n## Transcript\s*\n/);
   const cut = notes.search(/\n## /);
   const top = cut < 0 ? notes : notes.slice(0, cut);  // title, module, recorded, slides
@@ -101,6 +113,7 @@ function lectureView(text) {
       `<li class="l${h.level}"><a href="#${h.id}" data-action="jump" data-id="${h.id}">${esc(h.text)}</a></li>`).join('')}</ol></nav>` : ''}
     ${html}
     ${transcript ? `<details class="transcript"><summary>Transcript <span class="muted">· ${words.toLocaleString('en-GB')} words</span></summary><div class="tx"></div></details>` : ''}
+    ${cached ? `<p class="muted small offline-note">${I.offline}<span>Saved copy for reading offline. The transcript needs a connection.</span></p>` : ''}
   </article>
   <button class="totop ghost" data-action="totop" aria-label="Back to top">${I.up}</button>`;
 }

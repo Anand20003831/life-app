@@ -6,6 +6,8 @@
 
 import * as gh from './gh.js';
 import * as org from './organise.js';
+import * as revise from './revise.js';
+import * as offline from './offline.js';
 import { ago } from './format.js';
 import { draw } from './shell.js';
 
@@ -34,7 +36,7 @@ export const FILES = {
   courses: 'uni/courses.json', mail: 'uni/email/index.json', clickup: 'schedule/clickup.json',
   runs: 'state/runs.json', health: 'state/health.json', todos: 'schedule/todos.json', calendar: 'schedule/calendar.json',
   plan: 'schedule/plan.json', skipped: 'schedule/skipped.json', suggestions: 'schedule/suggestions.json',
-  decisions: 'schedule/decisions.json', ntk: 'uni/email/items.json',
+  decisions: 'schedule/decisions.json', ntk: 'uni/email/items.json', questions: 'uni/questions.json', revision: 'uni/revision.json',
 };
 
 export function fromCache() {
@@ -65,6 +67,7 @@ export async function refresh() {
       if (!navigator.onLine) throw new TypeError('offline');
       await gh.checkAccess();
       await org.flush(); // choices made offline go first, so what's read back includes them
+      await revise.flush();
       const got = await Promise.all(Object.entries(FILES).map(async ([k, p]) => [k, await gh.readJSON(p, null)]));
       for (const [k, v] of got) state.data[k] = v;
       await Promise.all([loadPending(), loadJobs()]);
@@ -76,6 +79,8 @@ export async function refresh() {
     setDot();
     changed = JSON.stringify([state.data, state.pending, state.jobs]) !== before;
     if (changed || state.status.kind !== was || was === 'idle') draw();
+    // then, quietly, save recent lecture notes for reading offline
+    if (state.status.kind === 'ok') offline.saveRecent()?.then((n) => { if (n && state.tab === 'uni') draw(); }).catch(() => {});
     return { changed, status: state.status.kind };
   })();
   try { return await syncing; } finally { syncing = null; }

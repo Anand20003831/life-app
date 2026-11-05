@@ -127,7 +127,7 @@ function focusCard(t) {
     <div class="f-more">${b.focus?.why ? `<p class="muted">${esc(b.focus.why)}</p>` : ''}
       ${b.headline && b.focus ? `<p><b>${esc(b.headline)}</b></p>` : ''}
       <ul class="items">${(b.items || []).map((i) => `<li class="k-${esc(i.kind)}"><span>${KIND[i.kind] || I.clock}</span><span class="txt">${esc(i.text)}</span></li>`).join('')}</ul>
-      ${t.plan_summary ? `<p class="muted small">This week: ${esc(t.plan_summary)}</p>` : ''}
+      ${t.plan_summary ? `<p class="muted small">Suggested for this week (not in your calendar until you tick it): ${esc(t.plan_summary)}</p>` : ''}
       ${changes.length ? `<p class="small"><b>Timetable changes</b></p><ul class="plainlist small">${changes.map((c) => `<li>${esc(c.text)}</li>`).join('')}</ul>` : ''}</div></details>`;
 }
 

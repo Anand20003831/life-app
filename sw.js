@@ -2,11 +2,11 @@
 // shipped file changes: the new worker installs alongside the old one and waits;
 // the app shows "A new version is ready · Reload", and Reload swaps it in.
 // Data never goes through here: it comes from the GitHub API and the app caches it.
-const CACHE = 'life-v15';
+const CACHE = 'life-v18';
 const SHELL = ['./', './index.html', './offline.html', './styles.css', './app.js', './gh.js', './ai.js', './md.js', './chat.js',
   './threads.js', './icons.js', './ui.js', './organise.js',
   './store.js', './format.js', './parts.js', './shell.js', './today.js', './uni.js', './mail.js', './settings.js', './sheets.js',
-  './gestures.js', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png',
+  './gestures.js', './revise.js', './offline.js', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png',
   './icons/icon-maskable-512.png', './icons/apple-touch-icon.png', './icons/favicon-32.png'];
 
 self.addEventListener('install', (e) => {

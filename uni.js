@@ -1,4 +1,4 @@
-// Uni: deadlines, lectures, the group's ClickUp board, modules and delegated jobs.
+// Uni: deadlines, lectures, revision, the group's ClickUp board, modules and delegated jobs.
 
 import { esc } from './md.js';
 import { I } from './icons.js';
@@ -6,15 +6,19 @@ import * as org from './organise.js';
 import { state } from './store.js';
 import { ago, chip, dayShort, rail } from './format.js';
 import { blocked, empty, firstLoad, skeleton, statusNote, taskCard } from './parts.js';
+import * as revise from './revise.js';
+import * as offline from './offline.js';
 
 export function uniView() {
-  const tabs = [['deadlines', 'Deadlines'], ['lectures', 'Lectures'], ['group', 'Group'], ['modules', 'Modules'], ['jobs', 'Jobs']];
+  const due = revise.dueCount();
+  const tabs = [['deadlines', 'Deadlines'], ['lectures', 'Lectures'], ['revise', `Revise${due ? ` <span class="badge" aria-label="${due} due today">${due}</span>` : ''}`],
+    ['group', 'Group'], ['modules', 'Modules'], ['jobs', 'Jobs']];
   const seg = `<div class="seg" role="tablist" aria-label="Uni">${tabs.map(([k, l]) => `<button role="tab" aria-selected="${state.uniTab === k}" class="${state.uniTab === k ? 'on' : ''}" data-action="uniTab" data-k="${k}">${l}</button>`).join('')}</div>`;
-  const need = { deadlines: 'deadlines', lectures: 'lectures', group: 'clickup', modules: 'courses', jobs: null }[state.uniTab];
+  const need = { deadlines: 'deadlines', lectures: 'lectures', revise: 'questions', group: 'clickup', modules: 'courses', jobs: null }[state.uniTab];
   let body;
   if (need && state.data[need] == null && firstLoad()) body = skeleton('list', 4);
   else if (need && state.data[need] == null && blocked()) body = blocked();
-  else body = ({ deadlines: deadlinesPane, lectures: lecturesPane, group: groupPane, modules: modulesPane, jobs: jobsPane }[state.uniTab])();
+  else body = ({ deadlines: deadlinesPane, lectures: lecturesPane, revise: revise.view, group: groupPane, modules: modulesPane, jobs: jobsPane }[state.uniTab])();
   return statusNote() + seg + `<div class="pane">${body}</div>`;
 }
 
@@ -29,9 +33,10 @@ function deadlinesPane() {
 function lecturesPane() {
   const lec = state.data.lectures || [];
   if (!lec.length) return empty(I.book, 'No lectures yet', 'Recordings appear here after the 08:00 and 18:00 sync, with study notes and the transcript.');
+  const kept = offline.saved();
   return `<ul class="list">${lec.map((l) => `<li><button class="li-btn" data-action="open" data-path="${esc(l.path)}" data-title="${esc(l.name)}">
     <span class="li-head"><b>${esc(l.name)}</b>${chip(l.module)}</span>
-    <span class="muted small">${dayShort(l.date)} · ${(l.notes || 0) >= 2 ? '<span class="tag done">Study notes</span>' : l.summarised ? '<span class="tag plain">Summary</span>' : '<span class="tag plain">Transcript only</span>'}</span>
+    <span class="muted small">${dayShort(l.date)} · ${(l.notes || 0) >= 2 ? '<span class="tag done">Study notes</span>' : l.summarised ? '<span class="tag plain">Summary</span>' : '<span class="tag plain">Transcript only</span>'}${kept.has(l.path) ? ' <span class="tag plain offline-tag">Saved for offline</span>' : ''}</span>
     <span class="p">${esc(l.tldr || 'Notes are written at the next sync.')}</span></button></li>`).join('')}</ul>`;
 }
 
