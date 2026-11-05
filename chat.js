@@ -39,6 +39,13 @@ export function init(hooks) {
   list = threads.cachedIndex();
   const id = localStorage.getItem('chatCurrent');
   if (id) t = threads.cached(id);
+  restoreDraft();
+  // One file picker for the life of the page, outside anything that's redrawn: if
+  // the chat redraws while the phone's picker is open (a sync finishing), a picker
+  // inside it would be replaced and the chosen files lost.
+  const picker = Object.assign(document.createElement('input'), { type: 'file', id: 'attach', multiple: true, hidden: true,
+    accept: 'image/*,application/pdf,text/*,.md,.c,.h,.cpp,.py,.java,.js,.json,.csv' });
+  document.body.append(picker);
   document.addEventListener('click', onClick);
   document.addEventListener('submit', onSubmit);
   document.addEventListener('input', onInput);
@@ -69,9 +76,11 @@ export async function mounted() {
       const moved = await threads.migrateLocal();
       list = await threads.index();
       if (moved && !t) t = moved;
-      if (t && !live) {
-        const fresh = await threads.load(t.id);
-        if (fresh && fresh.updated !== t.updated) t = fresh;
+      // the open chat, fresh from the repo (also when this device has no copy of it)
+      const want = t?.id || localStorage.getItem('chatCurrent');
+      if (want && !live) {
+        const fresh = await threads.load(want);
+        if (fresh && (!t || (t.id === want && fresh.updated !== t.updated))) t = fresh;
       }
       paint();
     } catch (err) { toast(`Couldn't load chats: ${err.message}`); }
@@ -94,8 +103,61 @@ function closeDrawer() {
 }
 
 function paint() {
+  keepDraft();
   if (app.tab() !== 'chat') return;
   app.draw();
+}
+
+// ---------------------------------------------------------------- the unsent message
+// What's typed and attached but not sent is kept on this device (IndexedDB: photos
+// can be megabytes), so a reload doesn't lose it. On Android, opening the camera from
+// "+" can reload the page. Cleared when the message is sent; kept for a day at most.
+
+const DRAFT_DB = 'life-drafts';
+function draftStore(mode, fn) {
+  return new Promise((resolve) => {
+    let req;
+    try { req = indexedDB.open(DRAFT_DB, 1); } catch { resolve(null); return; }
+    req.onupgradeneeded = () => req.result.createObjectStore('d');
+    req.onerror = () => resolve(null); // private browsing and the like: drafts just aren't kept
+    req.onsuccess = () => {
+      const db = req.result;
+      try {
+        const tx = db.transaction('d', mode);
+        const got = fn(tx.objectStore('d'));
+        tx.oncomplete = () => { db.close(); resolve(got?.result ?? null); };
+        tx.onerror = () => { db.close(); resolve(null); };
+      } catch { db.close(); resolve(null); }
+    };
+  });
+}
+let draftSig = '';
+let draftFiles = '';
+let draftTimer = 0;
+const writeDraft = () => {
+  clearTimeout(draftTimer);
+  draftTimer = 0;
+  const value = draft || files.length ? { draft, files, at: Date.now() } : null;
+  draftStore('readwrite', (s) => (value ? s.put(value, 'chat') : s.delete('chat')));
+};
+function keepDraft() {
+  const fileSig = JSON.stringify(files.map((f) => [f.name, f.bytes]));
+  const sig = draft + fileSig;
+  if (sig === draftSig) return;
+  draftSig = sig;
+  if (fileSig !== draftFiles) { draftFiles = fileSig; writeDraft(); return; } // attachments: at once
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(writeDraft, 400); // typing: once it pauses
+}
+document.addEventListener('visibilitychange', () => { if (document.hidden && draftTimer) writeDraft(); });
+async function restoreDraft() {
+  const v = await draftStore('readonly', (s) => s.get('chat'));
+  if (!v || Date.now() - v.at > 864e5 || draft || files.length) return;
+  draft = v.draft || '';
+  files = v.files || [];
+  draftFiles = JSON.stringify(files.map((f) => [f.name, f.bytes]));
+  draftSig = draft + draftFiles;
+  paint();
 }
 
 const toast = (text) => uiToast(text);
@@ -196,7 +258,7 @@ function composer() {
       <button type="button" class="x" data-c="unattach" data-i="${i}" aria-label="Remove ${esc(f.name)}">${I.x}</button></span>`).join('')}</div>` : ''}
     <textarea name="q" rows="1" placeholder="${listening ? 'Listening…' : 'Message'}" aria-label="Message">${esc(draft)}</textarea>
     <div class="bar">
-      <label class="icon" aria-label="Attach files or photos">${I.plus}<input type="file" id="attach" multiple accept="image/*,application/pdf,text/*,.md,.c,.h,.cpp,.py,.java,.js,.json,.csv" hidden></label>
+      <button type="button" class="icon" data-c="attach" aria-label="Attach files or photos">${I.plus}</button>
       <select id="cmodel" aria-label="Model">${opts}</select>
       <select id="ceffort" aria-label="Effort">${['low', 'medium', 'high'].map((e) => `<option ${e === effort ? 'selected' : ''}>${e}</option>`).join('')}</select>
       <span class="grow"></span>
@@ -544,6 +606,7 @@ async function onClick(e) {
   } else if (c === 'starter') { turn({ text: el.dataset.text }); }
   else if (c === 'stop') { ctrl?.abort(); }
   else if (c === 'mic') { mic(); }
+  else if (c === 'attach') { $('#attach').click(); }
   else if (c === 'unattach') { files.splice(+el.dataset.i, 1); paint(); }
   else if (c === 'copy') {
     try { await navigator.clipboard.writeText(el.dataset.text); el.classList.add('done'); el.setAttribute('aria-label', 'Copied'); setTimeout(() => el.classList.remove('done'), 1500); }
@@ -612,7 +675,7 @@ function onSubmit(e) {
 
 let searchSeq = 0;
 function onInput(e) {
-  if (e.target.matches?.('.composer textarea')) { draft = e.target.value; sizeBox(); }
+  if (e.target.matches?.('.composer textarea')) { draft = e.target.value; sizeBox(); keepDraft(); }
   if (e.target.id === 'chatsearch') {
     query = e.target.value;
     hits = new Map();
