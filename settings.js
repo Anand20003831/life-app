@@ -7,7 +7,7 @@ import * as ai from './ai.js';
 import { esc } from './md.js';
 import { I } from './icons.js';
 import { state } from './store.js';
-import { ago } from './format.js';
+import { ago, dayShort } from './format.js';
 import { statusNote } from './parts.js';
 import * as org from './organise.js';
 
@@ -54,12 +54,30 @@ function group(items, noun, fold) {
       <ul class="health">${ok.map(row).join('')}</ul></details>` : ''}`;
 }
 
+// This device's GitHub token: red within 30 days of expiring. GitHub sends the date
+// in a header the browser may not be allowed to read (gh.checkAccess tries); if not,
+// it's the date entered under This device → Keys.
+export function tokenRow(today = new Date()) {
+  const date = localStorage.getItem('tokenExpires');
+  const make = 'Make a new one at github.com/settings/personal-access-tokens, paste it under This device → Keys, and update the date there.';
+  if (!date) {
+    return { label: 'GitHub key on this device', cls: 'meh', line: "Expiry date not known yet.",
+             fix: 'Add it under This device → Keys: it\'s on github.com/settings/personal-access-tokens, next to the token.' };
+  }
+  const left = Math.round((new Date(`${date}T12:00:00Z`) - new Date(`${today.toISOString().slice(0, 10)}T12:00:00Z`)) / 864e5);
+  const when = `${dayShort(`${date}T12:00:00Z`)} ${date.slice(0, 4)}`; // "Mon 11 Oct 2027", like every other date
+  if (left < 0) return { label: 'GitHub key on this device', cls: 'bad', line: `Expired on ${when}.`, fix: make };
+  if (left <= 30) return { label: 'GitHub key on this device', cls: 'bad', line: `Expires ${when}, in ${left} day${left === 1 ? '' : 's'}.`, fix: make };
+  return { label: 'GitHub key on this device', cls: 'good', line: `Expires ${when} (in ${left} days).` };
+}
+
 function healthCard() {
   const h = state.data.health;
   const checks = (h?.checks || []).filter((c) => c.id !== 'schedule').map((c) => ({ label: c.label, cls: DOT[c.state] || 'meh', line: c.detail, fix: c.fix }));
   const jobs = jobRows();
-  const bad = [...checks, ...jobs].filter((x) => x.cls === 'bad').length;
-  const meh = [...checks, ...jobs].filter((x) => x.cls === 'meh').length;
+  const device = [tokenRow()];
+  const bad = [...checks, ...jobs, ...device].filter((x) => x.cls === 'bad').length;
+  const meh = [...checks, ...jobs, ...device].filter((x) => x.cls === 'meh').length;
   const verdict = bad ? `${bad} thing${bad > 1 ? 's' : ''} need${bad > 1 ? '' : 's'} you` : meh ? 'Working, with something to keep an eye on' : 'Everything is working';
   return `<section class="card health-card"><h2>Health</h2>
     <p class="verdict ${bad ? 'bad' : meh ? 'meh' : 'good'}">${bad ? I.alert : I.check}<span>${verdict}</span></p>
@@ -68,6 +86,7 @@ function healthCard() {
     : '<p class="muted small">The daily self-test checks Moodle, Echo360, Gmail, Google Calendar, ClickUp, Gemini and notifications for real, without changing anything. It runs at about 05:30, or now:</p>'}
     <button class="ghost sm" data-action="run" data-wf="selftest.yml" data-label="Self-test">${I.retry}Check now</button>
     <h3 class="sub">Jobs</h3>${group(jobs, 'jobs', 'health-ok-jobs')}
+    <h3 class="sub">This device</h3><ul class="health">${device.map(row).join('')}</ul>
     ${deviceLine()}</section>`;
 }
 
@@ -100,6 +119,7 @@ export function settingsView() {
       <form data-action="savekeys" class="stack">
         <label>GitHub token <input name="ghToken" type="password" placeholder="Paste a new one to replace it" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
         <label>Gemini API key <input name="geminiKey" type="password" placeholder="Paste a new one to replace it" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+        ${localStorage.getItem('tokenExpiresFrom') === 'github' ? '' : `<label>GitHub token expires on <input name="tokenExpires" type="date" value="${esc(localStorage.getItem('tokenExpires') || '')}"></label>`}
         <label>Data repo <input name="repo" value="${gh.cfg.owner ? `${esc(gh.cfg.owner)}/${esc(gh.cfg.repo)}` : ''}" placeholder="your-username/life-data" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
         <button>Save</button></form></details>
       <div class="row wrap"><button class="ghost sm" data-action="setup-again">Set up again</button>
