@@ -7,6 +7,7 @@
 import * as gh from './gh.js';
 import * as org from './organise.js';
 import * as revise from './revise.js';
+import * as offline from './offline.js';
 import { ago } from './format.js';
 import { draw } from './shell.js';
 
@@ -78,6 +79,8 @@ export async function refresh() {
     setDot();
     changed = JSON.stringify([state.data, state.pending, state.jobs]) !== before;
     if (changed || state.status.kind !== was || was === 'idle') draw();
+    // then, quietly, save recent lecture notes for reading offline
+    if (state.status.kind === 'ok') offline.saveRecent()?.then((n) => { if (n && state.tab === 'uni') draw(); }).catch(() => {});
     return { changed, status: state.status.kind };
   })();
   try { return await syncing; } finally { syncing = null; }

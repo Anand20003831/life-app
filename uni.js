@@ -7,6 +7,7 @@ import { state } from './store.js';
 import { ago, chip, dayShort, rail } from './format.js';
 import { blocked, empty, firstLoad, skeleton, statusNote, taskCard } from './parts.js';
 import * as revise from './revise.js';
+import * as offline from './offline.js';
 
 export function uniView() {
   const due = revise.dueCount();
@@ -32,9 +33,10 @@ function deadlinesPane() {
 function lecturesPane() {
   const lec = state.data.lectures || [];
   if (!lec.length) return empty(I.book, 'No lectures yet', 'Recordings appear here after the 08:00 and 18:00 sync, with study notes and the transcript.');
+  const kept = offline.saved();
   return `<ul class="list">${lec.map((l) => `<li><button class="li-btn" data-action="open" data-path="${esc(l.path)}" data-title="${esc(l.name)}">
     <span class="li-head"><b>${esc(l.name)}</b>${chip(l.module)}</span>
-    <span class="muted small">${dayShort(l.date)} · ${(l.notes || 0) >= 2 ? '<span class="tag done">Study notes</span>' : l.summarised ? '<span class="tag plain">Summary</span>' : '<span class="tag plain">Transcript only</span>'}</span>
+    <span class="muted small">${dayShort(l.date)} · ${(l.notes || 0) >= 2 ? '<span class="tag done">Study notes</span>' : l.summarised ? '<span class="tag plain">Summary</span>' : '<span class="tag plain">Transcript only</span>'}${kept.has(l.path) ? ' <span class="tag plain offline-tag">Saved for offline</span>' : ''}</span>
     <span class="p">${esc(l.tldr || 'Notes are written at the next sync.')}</span></button></li>`).join('')}</ul>`;
 }
 
