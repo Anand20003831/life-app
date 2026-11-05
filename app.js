@@ -5,832 +5,34 @@
 // Every screen has four states: loading (skeletons), ready, empty (says what
 // will appear and when), and a problem: offline (cached data, with when it was
 // saved), or an error with Retry. Data older than expected is flagged as stale.
+//
+//   store.js     state and syncing with the repo     shell.js     routing and drawing
+//   format.js    dates, times, module colours         parts.js     shared pieces
+//   today.js · uni.js · mail.js · settings.js        the screens
+//   sheets.js    reader and delegate sheets           gestures.js  pull to refresh, swipe
+//   organise.js  suggestions and choices              chat.js      the chat
+//
+// This file wires taps, forms and keys to them, and starts the app.
 
 import * as gh from './gh.js';
 import * as ai from './ai.js';
 import * as chat from './chat.js';
-import { render as md, esc } from './md.js';
-import { I } from './icons.js';
-import { toast, reducedMotion } from './ui.js';
+import { render as md } from './md.js';
+import { toast, reducedMotion, haptic } from './ui.js';
 import * as org from './organise.js';
-
-const TZ = 'Europe/London';
-const $ = (sel, root = document) => root.querySelector(sel);
-const main = $('#main');
-
-const state = {
-  tab: localStorage.getItem('tab') || 'today',
-  uniTab: localStorage.getItem('uniTab') || 'deadlines',
-  mailTab: 'important',
-  todayTab: localStorage.getItem('todayTab') || 'day',
-  day: null,       // the day picked in Today's week strip (null = today)
-  week: 0,         // 0 = this week, 1 = next
-  data: {},
-  pending: [],     // proposed actions waiting for Confirm
-  jobs: [],        // delegated jobs, queued and finished
-  pendingLoaded: false,
-  status: { kind: 'idle' }, // idle | loading | ok | offline | error | auth
-  hidden: new Set(), // rows marked done this session (optimistic, undoable)
-};
-const scrolls = {};
-const folds = new Set(JSON.parse(localStorage.getItem('folds') || '[]')); // <details data-fold> left open
-
-// ---------------------------------------------------------------- formatting
-
-// Intl formatters are slow to create, so each format is made once and reused
-// (Today formats hundreds of dates to draw the week strip).
-const formatters = new Map();
-function formatter(locale, opts) {
-  const key = locale + JSON.stringify(opts);
-  if (!formatters.has(key)) formatters.set(key, new Intl.DateTimeFormat(locale, { timeZone: TZ, ...opts }));
-  return formatters.get(key);
-}
-const fmt = (iso, opts) => (iso ? formatter('en-GB', opts).format(new Date(iso)) : '');
-const time = (iso) => fmt(iso, { hour: '2-digit', minute: '2-digit' });
-const dayShort = (iso) => fmt(iso, { weekday: 'short', day: 'numeric', month: 'short' });
-const londonDate = (d = new Date()) => formatter('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
-const when = (iso) => `${dayShort(iso)}, ${time(iso)}`;
-
-function until(iso) {
-  const ms = new Date(iso) - Date.now();
-  const h = Math.round(ms / 3600000);
-  if (ms < 0) return h > -24 ? `${-h}h ago` : `${Math.round(-h / 24)}d ago`;
-  if (h < 1) return `in ${Math.max(1, Math.round(ms / 60000))} min`;
-  if (h < 36) return `in ${h}h`;
-  return `in ${Math.round(h / 24)} days`;
-}
-
-function ago(iso) {
-  if (!iso) return 'never';
-  const m = Math.max(0, Math.round((Date.now() - new Date(iso)) / 60000));
-  if (m < 1) return 'just now';
-  if (m < 60) return `${m} min ago`;
-  if (m < 48 * 60) return `${Math.round(m / 60)}h ago`;
-  return `${Math.round(m / 1440)}d ago`;
-}
-
-const KIND = { change: I.alert, focus: I.sparkle, heads_up: I.clock, people: I.users, admin: I.edit };
-
-// ---------------------------------------------------------------- modules: one colour each
-
-const norm = (s) => (s || '').toLowerCase().replace(/&amp;|&/g, 'and').replace(/[^a-z0-9]+/g, ' ').trim();
-
-// The module code for an event or item: its own field, or a timetable title
-// ("Operating Systems AND Concurrency - Lecture") matched to a course name.
-function moduleOf(e) {
-  if (e.module) return e.module;
-  const title = norm((e.title || '').split(' - ')[0]);
-  if (!title) return null;
-  const hit = (state.data.courses || []).find((c) => norm(c.name.replace(/\s*\(.*$/, '')) === title);
-  return hit ? hit.code : null;
-}
-
-function modIndex(code) {
-  const codes = (state.data.courses || []).map((c) => c.code).sort();
-  const i = codes.indexOf(code);
-  return (i < 0 ? [...code].reduce((a, ch) => a + ch.charCodeAt(0), 0) : i) % 6;
-}
-
-const chip = (code) => (code ? `<span class="chip m${modIndex(code)}">${esc(code.replace(/^COMP/, ''))}</span>` : '');
-const rail = (code) => (code ? ` m${modIndex(code)}` : '');
-
-// ---------------------------------------------------------------- shared pieces
-
-function empty(icon, title, text, action = '') {
-  return `<div class="empty-state">${icon}<h2>${esc(title)}</h2><p class="muted">${text}</p>${action}</div>`;
-}
-
-// Placeholder shapes while the first load is under way (nothing cached yet).
-function skeleton(kind = 'cards', n = 3) {
-  const line = (w) => `<span class="sk" style="width:${w}%"></span>`;
-  if (kind === 'list') {
-    return `<div class="skel" aria-busy="true" aria-label="Loading">${Array.from({ length: n }, () =>
-      `<div class="sk-card">${line(70)}${line(35)}${line(90)}</div>`).join('')}</div>`;
-  }
-  if (kind === 'text') return `<div class="skel" aria-busy="true" aria-label="Loading">${line(60)}${line(95)}${line(88)}${line(92)}${line(40)}</div>`;
-  return `<div class="skel" aria-busy="true" aria-label="Loading">${Array.from({ length: n }, (_, i) =>
-    `<div class="sk-card">${line(i ? 30 : 75)}${line(92)}${line(84)}${i ? '' : line(66)}</div>`).join('')}</div>`;
-}
-
-const firstLoad = () => state.status.kind === 'loading' && !localStorage.getItem('lastSync');
-
-// The line under each screen's title: when the data was saved, and any problem.
-function statusNote() {
-  const s = state.status;
-  const saved = localStorage.getItem('lastSync');
-  const retry = `<button class="link" data-action="refresh">Retry</button>`;
-  if (s.kind === 'offline') {
-    if (!saved) return ''; // nothing to show: the screen's own offline panel says so
-    const queued = org.pending();
-    return `<div class="note" role="status">${I.offline}<span>Offline · showing what was saved ${ago(saved)}${queued ? ` · ${queued} change${queued > 1 ? 's' : ''} will sync when you're back` : ''}</span>${retry}</div>`;
-  }
-  if (s.kind === 'error') {
-    if (!saved) return ''; // the screen shows the error panel instead
-    return `<div class="note bad" role="alert">${I.alert}<span>Couldn't refresh: ${esc(s.msg)}</span>${retry}</div>`;
-  }
-  if (s.kind === 'auth') {
-    return `<section class="card warn" role="alert"><h2>Can't open your data</h2><p>${esc(s.msg)}</p>
-      <div class="row"><button data-action="tab" data-tab="settings">Settings</button><button class="ghost" data-action="refresh">Retry</button></div></section>`;
-  }
-  return '';
-}
-
-// A screen with no data at all and a problem: one clear message, not an empty page.
-function blocked() {
-  const s = state.status;
-  if (s.kind === 'offline') return empty(I.offline, "You're offline", 'Nothing has been saved on this device yet. Connect once and it will work offline after that.', `<button data-action="refresh">Retry</button>`);
-  if (s.kind === 'error') return empty(I.alert, "Couldn't load", esc(s.msg), `<button data-action="refresh">Retry</button>`);
-  return '';
-}
-
-// ---------------------------------------------------------------- data
-
-const FILES = {
-  today: 'today.json', deadlines: 'uni/deadlines.json', lectures: 'uni/lectures.json',
-  courses: 'uni/courses.json', mail: 'uni/email/index.json', clickup: 'schedule/clickup.json',
-  runs: 'state/runs.json', todos: 'schedule/todos.json', calendar: 'schedule/calendar.json', plan: 'schedule/plan.json',
-  skipped: 'schedule/skipped.json', suggestions: 'schedule/suggestions.json', decisions: 'schedule/decisions.json',
-  ntk: 'uni/email/items.json',
-};
-
-function fromCache() {
-  for (const [k, path] of Object.entries(FILES)) state.data[k] = gh.cachedJSON(path, state.data[k] ?? null);
-  try { state.pending = JSON.parse(localStorage.getItem('pending') || '[]'); } catch { state.pending = []; }
-}
-
-function classify(err) {
-  if (!navigator.onLine || err instanceof TypeError || /GitHub 5\d\d/.test(err.message)) return 'offline';
-  if (/token|can't see|public repo|can read but not write/i.test(err.message)) return 'auth';
-  return 'error';
-}
-
-let syncing = null;
-// Loads everything; redraws only if something changed, so an unchanged refresh
-// costs no layout and nothing on screen moves.
-async function refresh() {
-  if (!gh.configured()) return null;
-  if (syncing) return syncing;
-  syncing = (async () => {
-    const before = JSON.stringify([state.data, state.pending, state.jobs]);
-    const was = state.status.kind;
-    state.status = { kind: 'loading' };
-    setDot('syncing');
-    if (firstLoad()) draw();
-    let changed = false;
-    try {
-      if (!navigator.onLine) throw new TypeError('offline');
-      await gh.checkAccess();
-      await org.flush(); // choices made offline go first, so what's read back includes them
-      const got = await Promise.all(Object.entries(FILES).map(async ([k, p]) => [k, await gh.readJSON(p, null)]));
-      for (const [k, v] of got) state.data[k] = v;
-      await Promise.all([loadPending(), loadJobs()]);
-      localStorage.setItem('lastSync', new Date().toISOString());
-      state.status = { kind: 'ok' };
-    } catch (err) {
-      state.status = { kind: classify(err), msg: err.message };
-    }
-    setDot();
-    changed = JSON.stringify([state.data, state.pending, state.jobs]) !== before;
-    if (changed || state.status.kind !== was || was === 'idle') draw();
-    return { changed, status: state.status.kind };
-  })();
-  try { return await syncing; } finally { syncing = null; }
-}
-
-// Only the inbox folders that exist are listed (a missing one is a 404).
-async function inboxDirs() {
-  const items = await gh.list('inbox');
-  return new Set(items.filter((i) => i.type === 'dir').map((i) => i.name));
-}
-
-let dirs = null;
-async function loadPending() {
-  dirs = await inboxDirs();
-  const files = dirs.has('actions') ? (await gh.list('inbox/actions')).filter((f) => f.name.endsWith('.json')) : [];
-  const all = await Promise.all(files.map((f) => gh.readJSON(f.path, null)));
-  state.pending = all.filter((a) => a && a.status === 'proposed');
-  state.pendingLoaded = true;
-  try { localStorage.setItem('pending', JSON.stringify(state.pending)); } catch { /* full */ }
-}
-
-async function loadJobs() {
-  dirs ||= await inboxDirs();
-  const [queued, done] = await Promise.all(['delegate', 'delegate-done'].map((d) => (dirs.has(d) ? gh.list(`inbox/${d}`) : [])));
-  const read = (list) => Promise.all(list.filter((f) => f.name.endsWith('.json')).map((f) => gh.readJSON(f.path, null)));
-  state.jobs = [...await read(queued), ...await read(done)].filter(Boolean)
-    .sort((a, b) => (b.created || '').localeCompare(a.created || ''));
-}
-
-function setDot(kind) {
-  const dot = $('#sync');
-  const k = kind || { ok: 'ok', loading: 'syncing', offline: 'offline', error: 'error', auth: 'error' }[state.status.kind] || '';
-  dot.className = `sync ${k}`;
-  const saved = localStorage.getItem('lastSync');
-  dot.setAttribute('aria-label', { ok: `Synced ${ago(saved)}`, syncing: 'Syncing…', offline: `Offline · saved ${ago(saved)}`, error: 'Sync problem' }[k] || 'Sync status');
-}
-
-// ---------------------------------------------------------------- shell + routing
-
-// #today, #uni/lectures, #mail/forum, #chat, #settings (notifications link here)
-function readRoute() {
-  const [tab, sub] = location.hash.slice(1).split('/');
-  if (!['today', 'uni', 'mail', 'chat', 'settings'].includes(tab)) return false;
-  state.tab = tab;
-  if (tab === 'uni' && ['deadlines', 'lectures', 'group', 'modules', 'jobs'].includes(sub)) state.uniTab = sub;
-  if (tab === 'today' && ['day', 'tasks'].includes(sub)) state.todayTab = sub;
-  if (tab === 'mail' && ['important', 'forum', 'noise'].includes(sub)) state.mailTab = sub;
-  return true;
-}
-
-function writeRoute() {
-  const sub = state.tab === 'uni' ? `/${state.uniTab}` : state.tab === 'mail' ? `/${state.mailTab}` : state.tab === 'today' && state.todayTab === 'tasks' ? '/tasks' : '';
-  history.replaceState(history.state, '', `#${state.tab}${sub}`);
-}
-
-function go(tab) {
-  if (tab === state.tab) { window.scrollTo({ top: 0, behavior: reducedMotion() ? 'auto' : 'smooth' }); return; }
-  scrolls[state.tab] = window.scrollY;
-  state.tab = tab;
-  localStorage.setItem('tab', tab);
-  draw({ enter: true });
-  window.scrollTo(0, scrolls[tab] || 0);
-}
-
-const drawn = { tab: '', html: '' };
-// vt: animate the change with a View Transition (the selected day and the Day/Tasks
-// pill glide to their new place); falls back to a plain redraw.
-function draw({ enter = false, vt = false } = {}) {
-  if (vt && document.startViewTransition && !reducedMotion() && !document.hidden) {
-    document.startViewTransition(() => paint({ enter: false, stagger: true }));
-    return;
-  }
-  paint({ enter, stagger: enter });
-}
-
-function paint({ enter = false, stagger = false } = {}) {
-  document.querySelectorAll('nav.tabs button').forEach((b) => {
-    b.classList.toggle('on', b.dataset.tab === state.tab);
-    if (b.dataset.tab === state.tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
-  });
-  document.body.dataset.tab = state.tab;
-  $('#top .brand').textContent = { today: 'Today', uni: 'Uni', mail: 'Mail', chat: 'Chat', settings: 'Settings' }[state.tab] || 'Life';
-  writeRoute();
-  if (!gh.configured() && state.tab !== 'settings') { main.innerHTML = setupView(); chat.unmounted(); return; }
-  const view = { today: todayView, uni: uniView, mail: mailView, chat: chat.view, settings: settingsView }[state.tab];
-  const html = view();
-  // Same screen, same HTML: leave the DOM alone (no repaint, nothing re-created,
-  // focus and selection kept). Most background refreshes end here.
-  if (state.tab !== 'chat' && !enter && html === drawn.html && drawn.tab === state.tab && main.firstChild) return;
-  drawn.html = html;
-  drawn.tab = state.tab;
-  main.innerHTML = html;
-  main.querySelectorAll('details[data-fold]').forEach((d) => { d.open = folds.has(d.dataset.fold); });
-  if (stagger && !reducedMotion()) { main.classList.remove('stagger'); void main.offsetWidth; main.classList.add('stagger'); }
-  if (enter && !reducedMotion()) { main.classList.remove('enter'); void main.offsetWidth; main.classList.add('enter'); }
-  if (state.tab === 'chat') chat.mounted(); else chat.unmounted();
-}
-
-function setupView() {
-  return empty(I.sparkle, 'Set up this device', 'This app reads your private <code>life-data</code> repo and talks to Gemini. It needs the repo name and two keys, stored only on this device.',
-    `<button data-action="tab" data-tab="settings">Open Settings</button>`);
-}
-
-// ---------------------------------------------------------------- Today
-// Glanceable first: a week strip, then Day (now/next, focus, what needs you,
-// the agenda) or Tasks (checkpoints, overdue, due this week). Details are one
-// tap away, not on the first screen.
-
-// Today is built hourly (07:00-23:00). Older than 3 hours while awake means a run was missed.
-function staleNote(t) {
-  const hours = (Date.now() - new Date(t.generated)) / 36e5;
-  const hourNow = +fmt(new Date().toISOString(), { hour: '2-digit', hour12: false });
-  if (hours < 3 || hourNow < 9) return '';
-  return `<div class="note warn" role="status">${I.clock}<span>Today was built ${ago(t.generated)}; the hourly update may be late.</span>
-    <button class="link" data-action="run" data-wf="pulse.yml" data-label="Today">Update now</button></div>`;
-}
-
-const dayCache = new Map();
-const dayOf = (iso) => {
-  if (!iso || iso.length <= 10) return iso;
-  if (!dayCache.has(iso)) dayCache.set(iso, londonDate(new Date(iso)));
-  return dayCache.get(iso);
-};
-const addDays = (date, n) => { const d = new Date(`${date}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
-const shortRoom = (loc) => {
-  const rooms = (loc || '').split(',').map((r) => r.trim().replace(/^JC (Computer Science|Business School)\s*/i, '')).filter(Boolean);
-  return rooms.length > 1 ? `${rooms[0]} +${rooms.length - 1}` : rooms[0] || '';
-};
-
-function skippedEvent(e) {
-  const skip = state.data.skipped || [];
-  return skip.some((s) => e.id === s || (e.id || '').startsWith(`${s}_`));
-}
-
-// Everything on one day, from the 14-day calendar, the plan, chat changes and
-// deadlines. Falls back to today.json when the calendar file isn't there yet.
-function agenda(date) {
-  const t = state.data.today || {};
-  const cal = state.data.calendar;
-  const rows = [];
-  if (cal) {
-    for (const e of cal.timetable || []) if (dayOf(e.start) === date) rows.push({ ...e, kind: 'class', mod: moduleOf(e) });
-    for (const e of cal.personal || []) {
-      if (dayOf(e.start) !== date || e.response === 'declined' || skippedEvent(e) || e.life_kind) continue;
-      rows.push({ ...e, kind: 'personal', allDay: e.all_day });
-    }
-  } else if (date === londonDate()) {
-    for (const e of t.classes || []) rows.push({ ...e, kind: 'class', mod: moduleOf(e) });
-    for (const e of t.personal || []) if (dayOf(e.start) === date) rows.push({ ...e, kind: 'personal', allDay: e.all_day });
-  } else if (date === addDays(londonDate(), 1)) {
-    for (const e of t.tomorrow || []) rows.push({ ...e, kind: 'class', mod: moduleOf(e) });
-  }
-  const blocks = state.data.plan?.blocks || (date === londonDate() ? t.plan_today : date === addDays(londonDate(), 1) ? t.plan_tomorrow : []) || [];
-  const decided = org.decisions();
-  for (const b of blocks) {
-    if (dayOf(b.start) !== date) continue;
-    const key = `plan:${dayOf(b.start)}:${(b.title || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)}`;
-    if (decided[key]) continue; // accepted ones show at the chosen time; dismissed ones not at all
-    rows.push({ ...b, kind: `plan ${b.kind || ''}`, plan: true, suggested: true, key });
-  }
-  for (const o of t.overrides || []) if (!o.cancelled && dayOf(o.start) === date) rows.push({ ...o, kind: 'override' });
-  rows.push(...acceptedOn(date));
-  return rows.sort((a, b) => (a.allDay ? -1 : 0) - (b.allDay ? -1 : 0) || new Date(a.start) - new Date(b.start));
-}
-
-// What's due on a day (Moodle, ClickUp key dates, to-dos), for the strip's dots and the agenda.
-function dueOn(date) {
-  const t = state.data.today || {};
-  const seen = new Set();
-  return [...(t.due || []).filter((d) => d.kind !== 'accepted'), ...(state.data.deadlines || []).filter((d) => ['assign', 'quiz', undefined].includes(d.kind))]
-    .filter((d) => d.due && dayOf(d.due) === date && !seen.has(d.title) && seen.add(d.title));
-}
-
-// Things he accepted, at the time he chose (this device's latest choices included).
-function acceptedOn(date) {
-  return org.items().filter((r) => r.state === 'accepted' && r.decision?.edit?.start && dayOf(r.decision.edit.start) === date)
-    .map((r) => { const e = r.decision.edit; return { title: e.title, start: e.start, end: new Date(new Date(e.start).getTime() + (e.minutes || 60) * 60000).toISOString(), kind: 'accepted', key: r.key }; });
-}
-
-const TILE = { class: I.book, personal: I.calendar, override: I.edit, plan: I.sparkle, gym: I.play, due: I.clock, accepted: I.check };
-function tileFor(r) {
-  if (r.kind.startsWith('plan')) return /gym/i.test(r.kind + r.title) ? I.play : I.sparkle;
-  if (r.kind === 'class' && /group|project/i.test(r.title)) return I.users;
-  return TILE[r.kind] || I.calendar;
-}
-
-function weekStrip(sel) {
-  const today = londonDate();
-  const monday = addDays(today, -((new Date(`${today}T12:00:00Z`).getUTCDay() + 6) % 7));
-  const start = addDays(monday, 7 * (state.week || 0));
-  const days = Array.from({ length: 7 }, (_, i) => addDays(start, i));
-  const month = new Date(`${start}T12:00:00Z`).toLocaleDateString('en-GB', { month: 'long', timeZone: 'UTC' });
-  return `<div class="week">
-    <div class="week-head"><b>${month}</b>
-      <div class="row"><button class="icon sm" data-action="week" data-d="-1" aria-label="Previous week" ${state.week <= 0 ? 'disabled' : ''}>${I.chevL}</button>
-      <button class="icon sm" data-action="week" data-d="1" aria-label="Next week" ${state.week >= 1 ? 'disabled' : ''}>${I.chevR}</button></div></div>
-    <div class="days" role="tablist" aria-label="Days">${days.map((d) => {
-      const dt = new Date(`${d}T12:00:00Z`);
-      const has = agenda(d).some((r) => !r.allDay);
-      const due = dueOn(d).length;
-      return `<button role="tab" aria-selected="${d === sel}" class="day-btn${d === sel ? ' on' : ''}${d === today ? ' today' : ''}${d < today ? ' past' : ''}" data-action="pickday" data-day="${d}"
-        aria-label="${dt.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' })}${due ? `, ${due} due` : ''}">
-        ${d === sel ? '<span class="sel-bg" aria-hidden="true"></span>' : ''}<span class="dw">${dt.toLocaleDateString('en-GB', { weekday: 'narrow', timeZone: 'UTC' })}</span><span class="dn">${dt.getUTCDate()}</span>
-        <span class="dots">${has ? '<i></i>' : ''}${due ? '<i class="due"></i>' : ''}</span></button>`;
-    }).join('')}</div></div>`;
-}
-
-// The one card to read first: what's on now, or next, with the room.
-function heroCard(rows) {
-  const now = Date.now();
-  const timed = rows.filter((r) => !r.allDay);
-  const live = timed.find((r) => new Date(r.start) <= now && now < new Date(r.end || r.start));
-  const next = timed.find((r) => new Date(r.start) > now);
-  const r = live || next;
-  if (!r) {
-    const tmrw = agenda(addDays(londonDate(), 1)).filter((x) => !x.allDay)[0];
-    return `<section class="hero quiet"><span class="eyebrow">Nothing else today</span>
-      ${tmrw ? `<p class="hero-title">Tomorrow starts ${time(tmrw.start)} · ${esc(tmrw.title)}</p>` : '<p class="hero-title">A free evening</p>'}</section>`;
-  }
-  const label = live ? `Now · until ${time(r.end)}` : `Next · ${until(r.start)}`;
-  return `<section class="hero${rail(r.mod)}${live ? ' live' : ''}"><span class="eyebrow">${label}</span>
-    <p class="hero-title">${r.plan ? '▸ ' : ''}${esc(r.title)}</p>
-    <p class="hero-meta">${time(r.start)}–${time(r.end)}${r.location ? ` · ${esc(shortRoom(r.location))}` : ''} ${chip(r.mod)}</p>
-    ${r.first_step ? `<p class="hero-step">Start with: ${esc(r.first_step)}</p>` : ''}</section>`;
-}
-
-// Focus in one line; the full briefing, the week's plan and timetable changes behind a tap.
-function focusCard(t) {
-  const b = t.brief;
-  if (!b) return '';
-  const changes = (t.changes || []).slice(0, 5);
-  return `<details class="focus-card"><summary>${I.sparkle}<span class="f-text"><span class="eyebrow">Focus</span>
-      <span class="f-what">${esc(b.focus?.what || b.headline || '')}</span></span><span class="chev">${I.chevD}</span></summary>
-    <div class="f-more">${b.focus?.why ? `<p class="muted">${esc(b.focus.why)}</p>` : ''}
-      ${b.headline && b.focus ? `<p><b>${esc(b.headline)}</b></p>` : ''}
-      <ul class="items">${(b.items || []).map((i) => `<li class="k-${esc(i.kind)}"><span>${KIND[i.kind] || I.clock}</span><span class="txt">${esc(i.text)}</span></li>`).join('')}</ul>
-      ${t.plan_summary ? `<p class="muted small">This week: ${esc(t.plan_summary)}</p>` : ''}
-      ${changes.length ? `<p class="small"><b>Timetable changes</b></p><ul class="plainlist small">${changes.map((c) => `<li>${esc(c.text)}</li>`).join('')}</ul>` : ''}</div></details>`;
-}
-
-// Real deadlines (Moodle, ClickUp key dates), soonest first.
-function realDeadlines() {
-  return ((state.data.today || {}).due || []).filter((d) => d.kind !== 'accepted');
-}
-
-function taskRow(d) {
-  const soon = new Date(d.due) - Date.now() < 3 * 864e5;
-  const meta = [d.source === 'clickup' ? (d.mine === false ? 'team' : 'yours') : d.source === 'moodle' ? 'Moodle' : null, when(d.due)].filter(Boolean).join(' · ');
-  return `<li class="trow" data-row="${esc(d.id || '')}">
-    <button class="trow-main" data-action="expand" aria-expanded="false">
-      <span class="trow-title">${esc(d.title)}</span>
-      <span class="trow-meta">${chip(d.module)}<span class="when${soon ? ' soon' : ''}">${until(d.due)}</span>${d.moved ? '<span class="tag">moved by email</span>' : ''}<span class="muted">· ${esc(meta)}</span></span></button>
-    <div class="trow-acts">${d.url ? `<a class="btn ghost sm" href="${esc(d.url)}" target="_blank" rel="noopener">${I.open}Open</a>` : ''}
-      <button class="ghost sm" data-action="delegate" data-task='${esc(JSON.stringify({ title: d.title, source: d.source, module: d.module, due: d.due, url: d.url }))}'>${I.delegate}Delegate</button></div></li>`;
-}
-
-function taskCard(title, items, cls = '') {
-  const rows = items.filter((d) => !state.hidden.has(d.id));
-  if (!rows.length) return '';
-  return `<section class="card tight ${cls}"><h3>${title} <span class="count">${rows.length}</span></h3><ul class="trows">${rows.map(taskRow).join('')}</ul></section>`;
-}
-
-function tasksPane() {
-  const all = org.items();
-  const by = (g) => all.filter((r) => r.group === g);
-  const body = taskCard('Deadlines', realDeadlines())
-    + org.section('Missed: still doing this?', by('missed'), { cls: 'warn', note: 'More than 3 days past their date. Tick to plan it again, or dismiss it.' })
-    + org.section('Suggestions', by('suggested'), { note: 'Not in your calendar until you tick one. Tap ✕ to dismiss; hold it to give a reason.' })
-    + org.section('Accepted', by('accepted'))
-    + org.section('Dismissed', by('dismissed'), { collapsed: true, fold: 'dismissed' });
-  return body || empty(I.check, 'All clear', 'No deadlines in the next 7 days and nothing waiting for a decision.');
-}
-
-function pendingCard() {
-  return `<section class="card confirm"><h3>Waiting for your OK</h3>${state.pending.map((a) => `<div class="pending">
-    <span>${esc(a.summary)}</span><div class="row"><button data-action="decide" data-yes="1" data-id="${a.id}">Confirm</button>
-    <button class="ghost" data-action="decide" data-yes="0" data-id="${a.id}">Dismiss</button></div></div>`).join('')}</section>`;
-}
-
-function todayView() {
-  const t = state.data.today;
-  const sel = state.day || londonDate();
-  const isToday = sel === londonDate();
-  const parts = [`<p class="dateline">${fmt(new Date().toISOString(), { weekday: 'long', day: 'numeric', month: 'long' })}${t ? ` · updated ${ago(t.generated)}` : ''}</p>`];
-  parts.push(statusNote());
-  if (!t) {
-    if (firstLoad()) return parts.join('') + skeleton('cards', 3);
-    return parts.join('') + (blocked() || empty(I.calendar, "Today isn't built yet",
-      'The hourly job builds it from your timetable, deadlines and email.', `<button data-action="run" data-wf="pulse.yml" data-label="Today">Build it now</button>`));
-  }
-  parts.push(staleNote(t));
-  const sugg = org.items();
-  const open = sugg.filter((r) => r.group === 'missed' || r.group === 'suggested');
-  const tasks = [...realDeadlines(), ...open];
-  const urgent = sugg.some((r) => r.group === 'missed') || realDeadlines().some((d) => new Date(d.due) - Date.now() < 2 * 864e5);
-  parts.push(`<div class="seg pill" role="tablist" aria-label="Today">
-    <button role="tab" aria-selected="${state.todayTab !== 'tasks'}" class="${state.todayTab !== 'tasks' ? 'on' : ''}" data-action="todayTab" data-k="day">${state.todayTab !== 'tasks' ? '<span class="pill-bg" aria-hidden="true"></span>' : ''}<span class="lbl">Day</span></button>
-    <button role="tab" aria-selected="${state.todayTab === 'tasks'}" class="${state.todayTab === 'tasks' ? 'on' : ''}" data-action="todayTab" data-k="tasks">${state.todayTab === 'tasks' ? '<span class="pill-bg" aria-hidden="true"></span>' : ''}<span class="lbl">Tasks</span>${tasks.length ? ` <span class="badge${urgent ? ' hot' : ''}">${tasks.length}</span>` : ''}</button></div>`);
-  if (state.pending.length) parts.push(pendingCard());
-
-  if (state.todayTab === 'tasks') return parts.join('') + `<div class="pane">${tasksPane()}</div>`;
-
-  const rows = agenda(sel);
-  const due = dueOn(sel);
-  const now = Date.now();
-  const day = [weekStrip(sel)];
-  if (isToday) {
-    day.push(heroCard(rows), focusCard(t));
-    // real deadlines in the next 48 hours, then suggestions due soon (with tick / dismiss)
-    const soonD = realDeadlines().filter((d) => new Date(d.due) - now < 2 * 864e5);
-    const soonS = open.filter((r) => r.group === 'suggested' && r.source !== 'plan' && r.due && new Date(r.due) - now < 2 * 864e5);
-    const missedN = sugg.filter((r) => r.group === 'missed').length;
-    const take = Math.max(0, 3 - soonD.length);
-    if (soonD.length || soonS.length || missedN) {
-      day.push(`<section class="card tight"><h3>Needs you <button class="link" data-action="todayTab" data-k="tasks">All tasks (${tasks.length})</button></h3>
-        ${soonD.length ? `<ul class="trows">${soonD.slice(0, 3).map(taskRow).join('')}</ul>` : ''}
-        ${soonS.length && take ? `<ul class="srows">${soonS.slice(0, take).map(org.row).join('')}</ul>` : ''}
-        ${missedN ? `<button class="missed-link" data-action="todayTab" data-k="tasks">${I.clock}<span>${missedN} missed: still doing ${missedN > 1 ? 'these' : 'this'}?</span>${I.chevR}</button>` : ''}</section>`);
-    }
-  }
-  // on today, only deadlines still ahead (the missed ones are in Needs you / Tasks)
-  const dueRows = due.filter((d) => !isToday || new Date(d.due) > now).map((d) => ({ start: d.due, title: d.title, kind: 'due', mod: d.module, dueItem: true }));
-  const list = [...rows, ...dueRows].sort((a, b) => (a.allDay ? -1 : 0) - (b.allDay ? -1 : 0) || new Date(a.start) - new Date(b.start));
-  const label = isToday ? 'Schedule' : new Date(`${sel}T12:00:00Z`).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' });
-  day.push(`<section class="card tight"><h3>${label}</h3>${list.length ? `<ol class="agenda">${list.map((r) => {
-    const live = isToday && !r.allDay && !r.dueItem && new Date(r.start) <= now && now < new Date(r.end || r.start);
-    const past = isToday && !r.allDay && new Date(r.end || r.start) < now;
-    const sub = r.dueItem ? 'Due' : r.kind === 'accepted' ? 'Accepted' : r.suggested ? 'Suggested · not in your calendar' : [r.location ? shortRoom(r.location) : '', r.note ? `changed: ${r.note}` : ''].filter(Boolean).join(' · ');
-    return `<li class="ag ${r.kind}${r.suggested ? ' suggested' : ''}${rail(r.mod)}${live ? ' live' : ''}${past ? ' past' : ''}">
-      <time>${r.allDay ? 'all day' : time(r.start)}${r.end && !r.allDay && !r.dueItem && dayOf(r.end) === dayOf(r.start) ? `<span>${time(r.end)}</span>` : ''}</time>
-      <span class="tile">${r.dueItem ? I.clock : tileFor(r)}</span>
-      <span class="ag-text"><b>${esc(r.title)}</b><span class="ag-meta">${chip(r.mod)}${sub ? `<span>${esc(sub)}</span>` : ''}${live ? '<span class="now">now</span>' : ''}</span>
-      ${r.first_step && !past ? `<span class="ag-step">Start with: ${esc(r.first_step)}</span>` : ''}</span></li>`;
-  }).join('')}</ol>` : `<p class="muted">${isToday ? 'Nothing else on today.' : 'Nothing on this day.'}</p>`}</section>`);
-  day.push(`<form class="ask" data-action="ask"><input name="q" placeholder="Tell it something…" autocomplete="off" aria-label="Tell the organiser something">
-    <button class="round" aria-label="Send to chat">${I.send}</button></form>`);
-  return parts.join('') + `<div class="pane">${day.join('')}</div>`;
-}
-
-// ---------------------------------------------------------------- Uni
-
-function uniView() {
-  const tabs = [['deadlines', 'Deadlines'], ['lectures', 'Lectures'], ['group', 'Group'], ['modules', 'Modules'], ['jobs', 'Jobs']];
-  const seg = `<div class="seg" role="tablist" aria-label="Uni">${tabs.map(([k, l]) => `<button role="tab" aria-selected="${state.uniTab === k}" class="${state.uniTab === k ? 'on' : ''}" data-action="uniTab" data-k="${k}">${l}</button>`).join('')}</div>`;
-  const need = { deadlines: 'deadlines', lectures: 'lectures', group: 'clickup', modules: 'courses', jobs: null }[state.uniTab];
-  let body;
-  if (need && state.data[need] == null && firstLoad()) body = skeleton('list', 4);
-  else if (need && state.data[need] == null && blocked()) body = blocked();
-  else body = ({ deadlines: deadlinesPane, lectures: lecturesPane, group: groupPane, modules: modulesPane, jobs: jobsPane }[state.uniTab])();
-  return statusNote() + seg + `<div class="pane">${body}</div>`;
-}
-
-function deadlinesPane() {
-  const moodle = (state.data.deadlines || []).map((d) => ({ ...d, source: 'moodle' }));
-  const team = (state.data.clickup?.tasks || []).filter((t) => !t.done && t.due && /key dates/i.test(t.list || ''))
-    .map((t) => ({ title: t.name, due: t.due, url: t.url, source: 'clickup', module: 'COMP2002', mine: t.mine }));
-  const all = [...moodle, ...team].filter((d) => new Date(d.due) > Date.now() - 864e5).sort((a, b) => new Date(a.due) - new Date(b.due));
-  return all.length ? taskCard('Upcoming', all) : empty(I.calendar, 'No deadlines coming up', 'Moodle deadlines and the group\'s ClickUp key dates show here. Moodle is checked at 8am and 6pm.');
-}
-
-function lecturesPane() {
-  const lec = state.data.lectures || [];
-  if (!lec.length) return empty(I.book, 'No lectures yet', 'Recordings appear here after the 8am and 6pm sync, with study notes and the transcript.');
-  return `<ul class="list">${lec.map((l) => `<li><button class="li-btn" data-action="open" data-path="${esc(l.path)}" data-title="${esc(l.name)}">
-    <span class="li-head"><b>${esc(l.name)}</b>${chip(l.module)}</span>
-    <span class="muted small">${dayShort(l.date)} · ${(l.notes || 0) >= 2 ? '<span class="tag done">Study notes</span>' : l.summarised ? '<span class="tag plain">Summary</span>' : '<span class="tag plain">Transcript only</span>'}</span>
-    <span class="p">${esc(l.tldr || 'Notes are written at the next sync.')}</span></button></li>`).join('')}</ul>`;
-}
-
-// ClickUp tasks as suggestions (tick / dismiss), key dates as deadlines.
-function clickupItems() {
-  return (state.data.clickup?.tasks || []).filter((t) => !t.done && !/key dates/i.test(t.list || ''))
-    .map((t) => ({ key: `clickup:${t.id}`, source: 'clickup', title: t.name, due: t.due, url: t.url, task_id: t.id,
-                   assignees: t.assignees || [], list: t.list, module: 'COMP2002', mine: t.mine }));
-}
-
-function groupPane() {
-  if (!state.data.clickup) return empty(I.users, "ClickUp isn't linked yet", 'Once the ClickUp token is set, the group board shows here (Settings → Health).');
-  const keyDates = (state.data.clickup.tasks || []).filter((t) => !t.done && t.due && /key dates/i.test(t.list || ''))
-    .map((t) => ({ id: t.id, title: t.name, due: t.due, url: t.url, source: 'clickup', module: 'COMP2002', mine: t.mine }));
-  const extra = clickupItems();
-  const all = org.items(extra).filter((r) => r.source === 'clickup');
-  const mineKeys = new Set(extra.filter((t) => t.mine).map((t) => t.key));
-  const live = (r) => r.state !== 'dismissed';
-  return taskCard('Key dates (deadlines)', keyDates)
-    + org.section('Yours', all.filter((r) => mineKeys.has(r.key) && live(r)))
-    + org.section('Team', all.filter((r) => !mineKeys.has(r.key) && live(r)), { note: 'Tick one to put it in your own calendar.' })
-    + org.section('Dismissed', all.filter((r) => r.state === 'dismissed'), { collapsed: true, fold: 'group-dismissed' });
-}
-
-function modulesPane() {
-  const c = state.data.courses || [];
-  if (!c.length) return empty(I.book, 'No modules yet', 'Your Moodle modules appear after the first uni sync.');
-  return `<ul class="list">${c.map((m) => `<li class="mod${rail(m.code)}"><div class="li-head"><b>${esc(m.name.replace(/\s*\(.*$/, ''))}</b>${chip(m.code)}</div>
-    <div class="row"><button class="ghost sm" data-action="open" data-path="uni/${esc(m.code)}/index.md" data-title="${esc(m.code)} page">Page</button>
-    <button class="ghost sm" data-action="open" data-path="uni/${esc(m.code)}/announcements.md" data-title="${esc(m.code)} announcements">Announcements</button>
-    <a class="btn ghost sm" href="${esc(m.url)}" target="_blank" rel="noopener">${I.open}Moodle</a></div></li>`).join('')}</ul>`;
-}
-
-function jobsPane() {
-  if (!state.jobs.length) return empty(I.delegate, 'Nothing delegated yet', 'Tap Delegate on any deadline or group task to hand a small, non-assessed job to the cloud. Results land here.');
-  return `<ul class="list">${state.jobs.map((j) => {
-    const inner = `<span class="li-head"><b>${esc(j.task?.title || 'Job')}</b><span class="tag ${j.status}">${esc(j.status)}</span></span>
-      <span class="p">${esc(j.instruction)}</span>
-      <span class="muted small">${esc(j.used || j.model || 'default model')} · ${esc(j.effort || 'medium')} effort · ${ago(j.finished || j.created)}</span>
-      ${j.error ? `<span class="err small">${esc(j.error)}</span>` : ''}`;
-    return `<li>${j.folder ? `<button class="li-btn" data-action="open" data-path="${esc(j.folder)}/README.md" data-title="${esc(j.task?.title || 'Job')}">${inner}</button>` : `<div class="li-btn static">${inner}</div>`}</li>`;
-  }).join('')}</ul>`;
-}
-
-// ---------------------------------------------------------------- Mail
-
-function mailView() {
-  const tabs = [['important', 'Important'], ['forum', 'Forum'], ['noise', 'Filtered']];
-  const pick = { important: ['direct', 'person'], forum: ['forum'], noise: ['noise', 'secret', 'reminder', 'sent'] }[state.mailTab];
-  const seg = `<div class="seg" role="tablist" aria-label="Mail">${tabs.map(([k, l]) => `<button role="tab" aria-selected="${state.mailTab === k}" class="${state.mailTab === k ? 'on' : ''}" data-action="mailTab" data-k="${k}">${l}</button>`).join('')}</div>`;
-  if (state.data.mail == null && firstLoad()) return statusNote() + skeleton('list', 5);
-  if (state.data.mail == null && blocked()) return statusNote() + blocked();
-  const items = (state.data.mail || []).filter((m) => pick.includes(m.kind));
-  const none = { important: ['No important mail', 'Emails sent to you directly, and from staff, show here.'],
-                 forum: ['No forum posts', 'Moodle forum questions and answers show here.'],
-                 noise: ['Nothing filtered', 'Newsletters, reminders and sign-in codes are kept out of the way here (codes are never stored).'] }[state.mailTab];
-  const raw = `<div class="pane">${items.length ? `<ul class="list">${items.map((m) => `<li>${m.path ? `<button class="li-btn" data-action="open" data-path="${esc(m.path)}" data-title="${esc(m.subject)}">` : '<div class="li-btn static">'}
-      <b>${esc(m.subject)}</b><span class="muted small">${m.kind === 'direct' ? 'To you · ' : ''}${esc(m.from)} · ${dayShort(m.date)}${m.module ? ` · ${esc(m.module)}` : ''}</span>${m.path ? '</button>' : '</div>'}</li>`).join('')}</ul>`
-    : empty(I.mail, none[0], none[1])}</div>`;
-  return statusNote() + org.needToKnow(state.data.ntk || [])
-    + `<details class="card tight fold all-mail" data-fold="all-mail"><summary><h3>All emails <span class="count">${(state.data.mail || []).length}</span></h3><span class="chev">${I.chevD}</span></summary>${seg}${raw}</details>`;
-}
-
-// ---------------------------------------------------------------- Settings
-
-const EXPECT = { 'uni-sync': 13, 'lecture-sync': 13, 'mail-sync': 13, 'calendar-sync': 2, 'clickup-sync': 2, today: 2, planner: 26 };
-const JOB = { 'uni-sync': 'Moodle', 'lecture-sync': 'Lectures', 'mail-sync': 'Email', 'calendar-sync': 'Calendar', 'clickup-sync': 'ClickUp', today: 'Today briefing', planner: 'Week planner' };
-
-function settingsView() {
-  const runs = state.data.runs || {};
-  const health = Object.entries(EXPECT).map(([job, hours]) => {
-    const r = runs[job];
-    let cls = 'bad';
-    let note = 'not set up yet';
-    if (r) {
-      const age = (Date.now() - new Date(r.last_ok || 0)) / 3600000;
-      cls = r.status === 'ok' && age <= hours ? 'good' : age <= hours * 2 ? 'meh' : 'bad';
-      note = `${r.status === 'ok' ? (cls === 'good' ? 'OK' : 'late') : esc(r.status)} · last good ${ago(r.last_ok)}`;
-    }
-    return `<li class="${cls}"><b>${JOB[job]}</b> <span class="muted small">${note}</span></li>`;
-  }).join('');
-  const masked = (v) => (v ? `${esc(v.slice(0, 6))}…${esc(v.slice(-4))}` : 'not set');
-  const saved = localStorage.getItem('lastSync');
-  return `${statusNote()}<section class="card"><h2>Keys (this device only)</h2>
-    <form data-action="savekeys" class="stack">
-      <label>GitHub token <span class="muted small">${masked(gh.cfg.token)}</span><input name="ghToken" type="password" placeholder="github_pat_…" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
-      <label>Gemini API key <span class="muted small">${masked(gh.cfg.geminiKey)}</span><input name="geminiKey" type="password" placeholder="Paste to replace" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
-      <label>Data repo <input name="repo" value="${gh.cfg.owner ? `${esc(gh.cfg.owner)}/${esc(gh.cfg.repo)}` : ''}" placeholder="your-username/life-data" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
-      <button>Save</button></form></section>
-    <section class="card"><h2>Run now</h2><div class="stack-btns">
-      <button class="ghost" data-action="run" data-wf="uni-sync.yml" data-label="Moodle, lectures and email">${I.play}Check Moodle, lectures and email</button>
-      <button class="ghost" data-action="run" data-wf="pulse.yml" data-label="Calendar, ClickUp and Today">${I.play}Refresh calendar, ClickUp and Today</button>
-      <button class="ghost" data-action="replan">${I.calendar}Re-plan the week</button>
-      <button class="ghost" data-action="refresh">${I.refresh}Reload data on this device</button></div>
-      <p class="muted small">A run takes 1 to 5 minutes; you get a notification for anything new.</p></section>
-    <section class="card"><h2>Health</h2><ul class="health">${health}</ul>
-      <p class="muted small">This device last synced ${ago(saved)}. The dot at the top is green when synced, blue while syncing, grey offline, red on a problem.</p></section>`;
-}
-
-// ---------------------------------------------------------------- sheets (reader, delegate)
-
-// A sheet is one step in the history, so Android's back button closes it.
-function overlay(html, { title = '', download = '', full = false } = {}) {
-  const el = document.createElement('div');
-  el.className = 'overlay';
-  el.innerHTML = `<div class="sheet${full ? ' full' : ''}" role="dialog" aria-modal="true" aria-label="${esc(title || 'Details')}">
-    <div class="sheet-bar"><span class="sheet-title">${esc(title)}</span>
-      ${download ? `<button class="icon" data-action="download" data-name="${esc(download)}" aria-label="Download">${I.download}</button>` : ''}
-      <button class="icon" data-action="close" aria-label="Close">${I.x}</button></div>
-    <div class="body">${html}</div></div>`;
-  document.body.append(el);
-  document.body.classList.add('sheet-open');
-  history.pushState({ sheet: (history.state?.sheet || 0) + 1 }, '');
-  $('.sheet [data-action=close]', el).focus({ preventScroll: true });
-  return { el, body: $('.body', el) };
-}
-
-function closeTop({ fromHistory = false } = {}) {
-  const all = document.querySelectorAll('.overlay:not(.closing)');
-  const el = all[all.length - 1];
-  if (!el) return false;
-  if (!fromHistory && history.state?.sheet) { history.back(); return true; } // popstate closes it
-  el.classList.add('closing');
-  setTimeout(() => {
-    el.remove();
-    if (!document.querySelector('.overlay')) document.body.classList.remove('sheet-open');
-  }, reducedMotion() ? 0 : 180);
-  return true;
-}
+import { $, state, folds, fromCache, refresh, loadJobs, savePending, setDot } from './store.js';
+import { addDays, ago, londonDate, mondayOf, short } from './format.js';
+import { draw, go, readRoute } from './shell.js';
+import { clickupItems } from './uni.js';
+import { closeTop, delegateDialog, openFile, resolvePath } from './sheets.js';
+import { setupClick, setupSubmit, startSetup } from './settings.js';
+import { pullRefresh } from './gestures.js';
+
+const main = document.getElementById('main');
 
 window.addEventListener('popstate', () => {
   if (closeTop({ fromHistory: true })) return;
   chat.back();
-});
-
-async function openFile(path, title) {
-  const name = path.split('/').pop().replace(/\.chunks\.json$/, '');
-  // full height from the start, so the sheet doesn't jump when the file arrives
-  const ov = overlay(skeleton('text'), { title: title || name.replace(/\.md$/, ''), download: name, full: true });
-  const load = async () => {
-    try {
-      const text = await gh.readMaybeChunked(path);
-      if (text == null) { ov.body.innerHTML = empty(I.file, 'Not there yet', 'This file hasn\'t been written yet. It usually appears after the next sync.'); return; }
-      const isMd = /\.md$/.test(path.replace(/\.chunks\.json$/, ''));
-      if (/\/lectures\/[^/]+\.md$/.test(path)) {
-        ov.body.innerHTML = lectureView(text);
-        ov.body.dataset.transcript = text.split(/\n## Transcript\s*\n/)[1] || '';
-      } else {
-        ov.body.innerHTML = isMd ? `<article class="md">${md(text)}</article>` : `<pre class="file">${esc(text)}</pre>`;
-      }
-      ov.body.dataset.base = path.slice(0, path.lastIndexOf('/') + 1);
-      ov.body.dataset.text = text.length < 2e6 ? text : '';
-    } catch (err) {
-      const off = classify(err) === 'offline';
-      ov.body.innerHTML = empty(off ? I.offline : I.alert, off ? "Can't open this offline" : "Couldn't open this",
-        off ? 'Files are fetched when you open them. Try again when you have signal.' : esc(err.message), '<button class="retry-file">Retry</button>');
-      $('.retry-file', ov.body).onclick = () => { ov.body.innerHTML = skeleton('text'); load(); };
-    }
-  };
-  load();
-}
-
-// A lecture file: header, notes (or the old summary), then the transcript.
-// The notes get a contents list; the transcript is collapsed and only rendered
-// when opened, since it can be 60k characters.
-function lectureView(text) {
-  const [notes, transcript] = text.split(/\n## Transcript\s*\n/);
-  const cut = notes.search(/\n## /);
-  const top = cut < 0 ? notes : notes.slice(0, cut);  // title, module, recorded, slides
-  const headings = [];
-  const html = md(cut < 0 ? '' : notes.slice(cut), { ids: true, headings });
-  const toc = headings.filter((h) => h.level >= 2 && h.level <= 3);
-  const words = transcript ? transcript.split(/\s+/).length : 0;
-  return `<article class="md notes">
-    ${md(top)}
-    ${toc.length > 2 ? `<nav class="toc" aria-label="Contents"><h4>Contents</h4><ol>${toc.map((h) =>
-      `<li class="l${h.level}"><a href="#${h.id}" data-action="jump" data-id="${h.id}">${esc(h.text)}</a></li>`).join('')}</ol></nav>` : ''}
-    ${html}
-    ${transcript ? `<details class="transcript"><summary>Transcript <span class="muted">· ${words.toLocaleString('en-GB')} words</span></summary><div class="tx"></div></details>` : ''}
-  </article>
-  <button class="totop ghost" data-action="totop" aria-label="Back to top">${I.up}</button>`;
-}
-
-// "../files/x.md" from uni/C/lectures/ → uni/C/files/x.md
-function resolvePath(base, rel) {
-  const parts = (base + rel).split('/');
-  const out = [];
-  for (const p of parts) { if (p === '..') out.pop(); else if (p !== '.') out.push(p); }
-  return out.join('/');
-}
-
-async function delegateDialog(task) {
-  const cached = ai.cachedModels();
-  const current = ai.settings.model;
-  const opts = (list) => list.map((m) => `<option ${m.id === current ? 'selected' : ''}>${esc(m.id)}</option>`).join('');
-  const ov = overlay(`<p class="lead"><b>${esc(task.title)}</b><br><span class="muted small">${esc(task.module || '')}${task.due ? ` · due ${when(task.due)}` : ''}</span></p>
-    <form class="stack" data-action="delegate-go">
-      <label>What should it do? <textarea name="instruction" rows="4" required placeholder="e.g. write 15 practice questions with answers on this topic; or draft test cases for my parser"></textarea></label>
-      <div class="row two"><label>Model <select name="model">${cached.length ? opts(cached) : '<option value="">Default</option>'}</select></label>
-      <label>Effort <select name="effort">${['low', 'medium', 'high'].map((e) => `<option ${e === ai.settings.effort ? 'selected' : ''}>${e}</option>`).join('')}</select></label></div>
-      <div class="files-field"><label class="btn ghost sm">${I.plus}Add files<input name="files" type="file" multiple hidden></label><span class="muted small picked">Optional: PDFs, images, code</span></div>
-      <p class="muted small">For non-assessed prep and practice. Results land in Uni → Jobs, and you get a notification.</p>
-      <button>Start</button><p class="progress muted small" role="status"></p></form>`, { title: 'Delegate' });
-  $('form', ov.el).dataset.task = JSON.stringify(task);
-  $('input[type=file]', ov.el).addEventListener('change', (e) => {
-    const n = e.target.files.length;
-    $('.picked', ov.el).textContent = n ? [...e.target.files].map((f) => f.name).join(', ') : 'Optional: PDFs, images, code';
-  });
-  if (!cached.length) {
-    try {
-      const all = await ai.models();
-      $('select[name=model]', ov.el).innerHTML = opts(all);
-    } catch { /* keeps "Default" */ }
-  }
-}
-
-// ---------------------------------------------------------------- pull to refresh
-
-const ptr = document.createElement('div');
-ptr.className = 'ptr';
-ptr.innerHTML = I.refresh;
-ptr.setAttribute('aria-hidden', 'true');
-document.body.append(ptr);
-let pull = null;
-
-async function pullRefresh() {
-  ptr.classList.add('spin');
-  const got = await refresh();
-  ptr.classList.remove('spin', 'ready');
-  ptr.style.transform = '';
-  if (!got) return;
-  toast(got.status === 'ok' ? (got.changed ? 'Updated' : 'Already up to date') : got.status === 'offline' ? 'Offline: showing saved data' : "Couldn't refresh");
-}
-
-window.addEventListener('touchstart', (e) => {
-  if (!['today', 'uni', 'mail'].includes(state.tab) || window.scrollY > 0 || document.querySelector('.overlay') || e.touches.length !== 1) return;
-  pull = { y: e.touches[0].clientY, d: 0 };
-}, { passive: true });
-window.addEventListener('touchmove', (e) => {
-  if (!pull) return;
-  const d = e.touches[0].clientY - pull.y;
-  if (d < 0 || window.scrollY > 0) { pull = null; ptr.style.transform = ''; return; }
-  pull.d = Math.min(d * 0.45, 96);
-  ptr.style.transform = `translate(-50%, ${pull.d}px) rotate(${pull.d * 3}deg)`;
-  ptr.classList.toggle('ready', pull.d > 64);
-}, { passive: true });
-// swipe left or right on Today's Day view to move a day
-let swipe = null;
-window.addEventListener('touchstart', (e) => {
-  swipe = state.tab === 'today' && state.todayTab !== 'tasks' && e.touches.length === 1 && e.target.closest('.week, .agenda, .hero')
-    ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : null;
-}, { passive: true });
-window.addEventListener('touchend', (e) => {
-  if (!swipe) return;
-  const t = e.changedTouches[0];
-  const dx = t.clientX - swipe.x;
-  const dy = t.clientY - swipe.y;
-  swipe = null;
-  if (Math.abs(dx) < 60 || Math.abs(dy) > 40) return;
-  const today = londonDate();
-  const next = addDays(state.day || today, dx < 0 ? 1 : -1);
-  const monday = addDays(today, -((new Date(`${today}T12:00:00Z`).getUTCDay() + 6) % 7));
-  if (next < monday || next > addDays(monday, 13)) return; // the calendar holds two weeks
-  state.day = next === today ? null : next;
-  state.week = next >= addDays(monday, 7) ? 1 : 0;
-  draw();
-  if (!reducedMotion()) $('.agenda')?.closest('.card')?.classList.add(dx < 0 ? 'from-right' : 'from-left');
-});
-window.addEventListener('touchend', () => {
-  if (!pull) return;
-  const go2 = pull.d > 64;
-  pull = null;
-  if (go2) { ptr.style.transform = 'translate(-50%, 64px)'; pullRefresh(); } else { ptr.style.transform = ''; ptr.classList.remove('ready'); }
 });
 
 // ---------------------------------------------------------------- events
@@ -856,7 +58,22 @@ document.addEventListener('click', async (e) => {
   const el = e.target.closest('[data-action]');
   if (!el || el.tagName === 'FORM' || el.tagName === 'SELECT') return;
   const a = el.dataset.action;
-  if (a === 'tab') go(el.dataset.tab);
+  if (setupClick(a)) { draw(); window.scrollTo(0, 0); return; }
+  if (a === 'setup-done') {
+    state.setup = false;
+    haptic();
+    go('today');
+    draw();
+    toast('All set. Loading your data…');
+    refresh();
+  } else if (a === 'setup-again') { startSetup(); draw(); window.scrollTo(0, 0); }
+  else if (a === 'forget-keys') {
+    toast('Remove the keys from this device?', { action: 'Remove', onAction: () => {
+      ['ghToken', 'geminiKey', 'owner', 'repo', 'lastSync', 'pending', 'models'].forEach((k) => localStorage.removeItem(k));
+      gh.clearCache();
+      startSetup(); draw();
+    } });
+  } else if (a === 'tab') go(el.dataset.tab);
   else if (a === 'todayTab') {
     state.todayTab = el.dataset.k; localStorage.setItem('todayTab', state.todayTab);
     draw({ vt: true });
@@ -867,26 +84,28 @@ document.addEventListener('click', async (e) => {
     draw({ vt: true });
   } else if (a === 'week') {
     state.week = Math.max(0, Math.min(1, (state.week || 0) + +el.dataset.d));
-    const monday = addDays(londonDate(), -((new Date(`${londonDate()}T12:00:00Z`).getUTCDay() + 6) % 7));
+    const monday = mondayOf(londonDate());
     state.day = state.week ? addDays(monday, 7) : null;
     draw({ vt: true });
   } else if (a === 'accept-item' || a === 'edit-item') {
     const item = findItem(el.dataset.key);
     if (!item) return;
+    haptic();
     if (a === 'accept-item' && !reducedMotion()) el.classList.add('pop');
     org.editSheet(item);
   } else if (a === 'dismiss-item') {
     if (holdFired) { holdFired = false; return; } // a long press already opened the reason sheet
     const item = findItem(el.dataset.key);
     if (!item) return;
+    haptic();
     org.dismiss(item);
-    afterChange(item.key, 'dismissed');
+    org.afterChange(item.key, 'dismissed');
     toast(`Dismissed: ${short(item.title)}`, { action: 'Undo', onAction: () => { org.restore(item); draw(); toast('Back in suggestions'); } });
   } else if (a === 'restore-item') {
     const item = findItem(el.dataset.key);
     if (!item) return;
     org.restore(item);
-    afterChange(item.key, 'restored');
+    org.afterChange(item.key, 'restored');
     toast('Back in suggestions');
   } else if (a === 'expand') {
     const row = el.closest('.trow');
@@ -931,7 +150,7 @@ document.addEventListener('click', async (e) => {
     try {
       await ai.decide(action, yes);
       state.pending = state.pending.filter((p) => p.id !== action.id);
-      localStorage.setItem('pending', JSON.stringify(state.pending));
+      savePending();
       toast(yes ? 'Confirmed. ClickUp updates within a couple of minutes.' : 'Dismissed. Nothing was changed.');
     } catch (err) { toast(`Couldn't send that: ${err.message}`); }
     draw();
@@ -942,24 +161,10 @@ document.addEventListener('click', async (e) => {
   }
 });
 
-// ---- suggestions: find, animate away, press and hold
 
-const short = (t, n = 40) => (t.length > n ? `${t.slice(0, n - 1).trimEnd()}…` : t);
 
 function findItem(key) {
   return org.items(clickupItems()).find((r) => r.key === key);
-}
-
-// The row slides away and the list closes up; then everything redraws.
-function afterChange(key, kind) {
-  const rows = [...main.querySelectorAll(`.srow[data-key="${CSS.escape(key)}"]`)];
-  if (!rows.length || reducedMotion()) { draw(); return; }
-  for (const row of rows) {
-    row.style.height = `${row.offsetHeight}px`;
-    row.classList.add(kind === 'accepted' ? 'out-accept' : 'out-dismiss');
-    requestAnimationFrame(() => row.classList.add('collapsing'));
-  }
-  setTimeout(() => draw(), 340);
 }
 
 let holdFired = false;
@@ -967,7 +172,7 @@ document.addEventListener('pointerdown', (e) => {
   const el = e.target.closest('[data-action=dismiss-item]');
   if (!el) return;
   holdFired = false;
-  org.holdStart(el, () => { holdFired = true; const item = findItem(el.dataset.key); if (item) org.dismissSheet(item); });
+  org.holdStart(el, () => { holdFired = true; haptic('hold'); const item = findItem(el.dataset.key); if (item) org.dismissSheet(item); });
 });
 ['pointerup', 'pointercancel', 'pointerleave'].forEach((t) => document.addEventListener(t, (e) => {
   if (e.type === 'pointerleave' && !e.target.closest?.('[data-action=dismiss-item]')) return;
@@ -997,7 +202,17 @@ document.addEventListener('toggle', (e) => {
   }
 }, true);
 
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && document.querySelector('.overlay')) closeTop(); });
+// Arrow keys move between tabs in a tab row (week days, Day/Tasks, Uni, Mail).
+document.addEventListener('keydown', (e) => {
+  const tab = e.target.closest?.('[role=tab]');
+  if (!tab || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+  const tabs = [...tab.closest('[role=tablist]').querySelectorAll('[role=tab]:not([disabled])')];
+  const i = tabs.indexOf(tab);
+  const next = tabs[e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : (i + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length];
+  e.preventDefault();
+  next.focus();
+  next.click(); // the redraw keeps focus on this tab (shell.js)
+});
 
 document.addEventListener('submit', async (e) => {
   const form = e.target;
@@ -1005,6 +220,7 @@ document.addEventListener('submit', async (e) => {
   e.preventDefault();
   const a = form.dataset.action;
   const data = Object.fromEntries(new FormData(form));
+  if (a === 'setup-step') { await setupSubmit(form, data, () => draw()); window.scrollTo(0, 0); return; }
   if (a === 'ask') {
     const q = (data.q || '').trim();
     if (!q) return;
@@ -1036,8 +252,7 @@ document.addEventListener('submit', async (e) => {
                                effort: data.effort, attachments });
       closeTop();
       state.uniTab = 'jobs';
-      dirs = null;
-      await loadJobs();
+      await loadJobs({ fresh: true });
       go('uni');
       draw();
       toast('Started. You\'ll get a notification when it\'s done.');
@@ -1083,16 +298,10 @@ if ('serviceWorker' in navigator) {
 
 readRoute();
 fromCache();
-org.init({
-  esc, chip, when, until, dayShort, time, I, toast, overlay, closeTop, draw, afterChange,
-  data: () => state.data, reducedMotion,
-  markDone: (id) => id && ai.markDone(id).catch(() => {}),
-  markUndone: (id) => id && ai.markUndone(id).catch(() => {}),
-});
 chat.init({
   draw, refresh, tab: () => state.tab, data: () => state.data, go,
   pending: () => state.pending, pendingLoaded: () => state.pendingLoaded,
-  setPending: (list) => { state.pending = list; localStorage.setItem('pending', JSON.stringify(list)); },
+  setPending: (list) => { state.pending = list; savePending(); },
 });
 setDot(localStorage.getItem('lastSync') ? 'ok' : '');
 draw();

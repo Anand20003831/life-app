@@ -3,8 +3,10 @@
 // (Contents read/write, Actions read/write). It lives in localStorage on each
 // device and is only ever sent to api.github.com.
 
-// apiBase is a local-testing hook (a mock server); unset in real use.
-const API = localStorage.getItem('apiBase') || 'https://api.github.com';
+// apiBase is a local-testing hook (a mock server on this machine). It is ignored
+// unless it points at localhost, so a token can never be sent anywhere else.
+export const localOnly = (v) => (v && /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/|$)/.test(v) ? v : null);
+const API = localOnly(localStorage.getItem('apiBase')) || 'https://api.github.com';
 
 export const cfg = {
   get owner() { return localStorage.getItem('owner') || ''; },
@@ -53,6 +55,11 @@ export function cachedText(path) {
 export async function readJSON(path, fallback = null) {
   const t = await readText(path);
   return t == null ? fallback : JSON.parse(t);
+}
+
+// Forget every file this device saved (Settings → Remove keys).
+export function clearCache() {
+  for (const k of Object.keys(localStorage)) if (k.startsWith('c:')) localStorage.removeItem(k);
 }
 
 export function cachedJSON(path, fallback = null) {

@@ -8,15 +8,21 @@
 
 const esc = (s) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+// Links are set aside while bare URLs are linked, so a URL inside a link's text
+// never becomes a link inside a link. Only http(s) links leave the app; anything
+// else is a path in the repo (opened in the reader), never a javascript: URL.
 function inline(s) {
+  const links = [];
+  const keep = (html) => `\u0000${links.push(html) - 1}\u0000`;
   return esc(s)
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/`([^`]+)`/g, (_, code) => keep(`<code>${code}</code>`))
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, text, href) =>
+      keep(/^https?:\/\//.test(href) ? `<a href="${href}" target="_blank" rel="noopener">${text}</a>`
+        : `<a href="#" data-path="${href}">${text}</a>`))
+    .replace(/(^|\s)(https?:\/\/[^\s<\u0000]+)/g, (_, pre, url) => pre + keep(`<a href="${url}" target="_blank" rel="noopener">${url}</a>`))
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>')
-    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, text, href) =>
-      /^https?:\/\//.test(href) ? `<a href="${href}" target="_blank" rel="noopener">${text}</a>`
-        : `<a href="#" data-path="${href}">${text}</a>`)
-    .replace(/(^|\s)(https?:\/\/[^\s<]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+    .replace(/\u0000(\d+)\u0000/g, (_, i) => links[+i]);
 }
 
 export function slugify(s) {

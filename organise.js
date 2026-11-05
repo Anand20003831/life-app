@@ -13,9 +13,17 @@
 // calendar, clickup_update / clickup_comment only when you asked for them).
 
 import * as gh from './gh.js';
+import * as ai from './ai.js';
+import { esc } from './md.js';
+import { I } from './icons.js';
+import { toast, reducedMotion } from './ui.js';
+import { state } from './store.js';
+import { chip, dayShort, time, until, when } from './format.js';
+import { draw } from './shell.js';
+import { closeTop, overlay } from './sheets.js';
 
-let ui = {};   // helpers from app.js: esc, chip, when, until, dayShort, I, toast, overlay, closeTop, draw, data, reducedMotion
-export function init(hooks) { ui = hooks; }
+const markDone = (id) => id && ai.markDone(id).catch(() => {});
+const markUndone = (id) => id && ai.markUndone(id).catch(() => {});
 
 // ---------------------------------------------------------------- decisions + outbox
 
@@ -28,7 +36,7 @@ export const pending = () => outbox.length;
 
 // Decisions as the screen should show them: the repo's, then anything not sent yet.
 export function decisions() {
-  const out = { ...(ui.data().decisions || {}) };
+  const out = { ...(state.data.decisions || {}) };
   for (const op of outbox) {
     if (op.op !== 'decision') continue;
     if (op.value) out[op.key] = op.value; else delete out[op.key];
@@ -75,9 +83,9 @@ export async function flush() {
       outbox = outbox.filter((o) => !batch.includes(o));
       saveOutbox();
       // the repo copy is now current
-      const merged = { ...(ui.data().decisions || {}) };
+      const merged = { ...(state.data.decisions || {}) };
       for (const o of decs) { if (o.value) merged[o.key] = o.value; else delete merged[o.key]; }
-      ui.data().decisions = merged;
+      state.data.decisions = merged;
       return true;
     } catch (err) {
       return false; // stays in the outbox; tried again on the next refresh or when back online
@@ -95,7 +103,7 @@ const sameTime = (a, b) => (!a && !b) || (a && b && +new Date(a) === +new Date(b
 export function cameBack(item, dec) {
   if (item.source !== 'clickup' || dec?.state !== 'dismissed') return null;
   const snap = dec.snapshot || {};
-  if (!sameTime(snap.due, item.due)) return item.due ? `the team moved it to ${ui.dayShort(item.due)}` : 'the team removed its date';
+  if (!sameTime(snap.due, item.due)) return item.due ? `the team moved it to ${dayShort(item.due)}` : 'the team removed its date';
   if ([...(snap.assignees || [])].sort().join() !== [...(item.assignees || [])].sort().join()) return 'it was reassigned';
   return null;
 }
@@ -105,7 +113,7 @@ const MISSED_MS = 3 * 864e5;
 // anything decided on this device since).
 export function items(extra = []) {
   const decs = decisions();
-  const base = [...(ui.data().suggestions?.items || []), ...extra];
+  const base = [...(state.data.suggestions?.items || []), ...extra];
   const seen = new Set();
   return base.filter((r) => !seen.has(r.key) && seen.add(r.key)).map((r) => {
     const dec = decs[r.key];
@@ -134,7 +142,7 @@ export function dismiss(item, { reason = '', comment = false } = {}) {
     action('clickup_comment', { task_id: item.task_id, text: reason }, `Comment on ${item.title}: "${reason}"`, `cm-${item.task_id}-${hash(reason)}`);
   }
   if (was?.state === 'accepted') action('life_sync', {}, 'Update the Life calendar');
-  if (reason === 'Already done' && (item.source === 'todo' || item.source === 'checkpoint')) ui.markDone?.(item.id);
+  if (reason === 'Already done' && (item.source === 'todo' || item.source === 'checkpoint')) markDone(item.id);
   flush();
 }
 
@@ -160,7 +168,7 @@ function clickupChange(item, edit, before) {
   const lines = [];
   const payload = { task_id: item.task_id };
   const was = before?.to?.includes('clickup') ? before : { title: item.title, start: item.due };
-  if (!sameTime(was.start, edit.start)) { payload.due = edit.start; lines.push(`due ${was.start ? ui.when(was.start) : 'none'} → ${ui.when(edit.start)}`); }
+  if (!sameTime(was.start, edit.start)) { payload.due = edit.start; lines.push(`due ${was.start ? when(was.start) : 'none'} → ${when(edit.start)}`); }
   if ((was.title || '') !== edit.title) { payload.name = edit.title; lines.push(`name "${was.title}" → "${edit.title}"`); }
   return lines.length ? { payload, lines } : null;
 }
@@ -170,7 +178,6 @@ function clickupChange(item, edit, before) {
 const LABEL = { clickup: 'ClickUp', todo: 'To-do', checkpoint: 'Checkpoint', plan: 'Plan', accepted: 'Accepted' };
 
 export function row(r) {
-  const { esc, chip, when, until, I } = ui;
   const meta = [LABEL[r.source] || r.source, r.due ? when(r.due) : null, r.for ? `for ${r.for}` : null].filter(Boolean).join(' · ');
   const late = r.due && new Date(r.due) < Date.now();
   if (r.state === 'accepted') {
@@ -183,13 +190,13 @@ export function row(r) {
   }
   if (r.state === 'dismissed') {
     return `<li class="srow dismissed" data-key="${esc(r.key)}"><div class="srow-main static">
-      <span class="trow-title">${esc(r.title)}</span>
+      <span class="trow-title">${esc(r.title || 'Untitled')}</span>
       <span class="trow-meta"><span class="reason">${r.decision?.reason ? esc(r.decision.reason) : 'Dismissed'}</span>${r.decision?.comment ? '<span class="muted">· posted on ClickUp</span>' : ''}</span></div>
-      <button class="ghost sm" data-action="restore-item" data-key="${esc(r.key)}">Restore</button></li>`;
+      <button class="ghost sm" data-action="restore-item" data-key="${esc(r.key)}" aria-label="Restore ${esc(r.title)}">Restore</button></li>`;
   }
   return `<li class="srow" data-key="${esc(r.key)}">
     <div class="srow-main static">
-      <span class="trow-title">${esc(r.title)}</span>
+      <span class="trow-title">${esc(r.title || 'Untitled')}</span>
       <span class="trow-meta">${chip(r.module)}<span class="when${late ? ' soon' : ''}">${r.due ? until(r.due) : ''}</span><span class="muted">· ${esc(meta)}</span>${r.url ? `<a class="src" href="${esc(r.url)}" target="_blank" rel="noopener">ClickUp</a>` : ''}</span>
       ${r.returned ? `<span class="returned">${I.retry}Back: ${esc(r.returned.why)}${r.returned.reason ? ` (you said: ${esc(r.returned.reason)})` : ''}</span>` : ''}
     </div>
@@ -203,14 +210,13 @@ export function section(title, rows, { cls = '', note = '', collapsed = false, f
   if (!rows.length) return '';
   const body = `<ul class="srows">${rows.map(row).join('')}</ul>`;
   if (collapsed) {
-    return `<details class="card tight fold ${cls}"${fold ? ` data-fold="${fold}"` : ''}><summary><h3>${title} <span class="count">${rows.length}</span></h3><span class="chev">${ui.I.chevD}</span></summary>${body}</details>`;
+    return `<details class="card tight fold ${cls}"${fold ? ` data-fold="${fold}"` : ''}><summary><h3>${title} <span class="count">${rows.length}</span></h3><span class="chev">${I.chevD}</span></summary>${body}</details>`;
   }
   return `<section class="card tight ${cls}"><h3>${title} <span class="count">${rows.length}</span></h3>${note ? `<p class="muted small sec-note">${note}</p>` : ''}${body}</section>`;
 }
 
 // ---------------------------------------------------------------- sheets
 
-const pad = (n) => String(n).padStart(2, '0');
 function localParts(iso) {
   const d = new Date(iso);
   const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
@@ -241,7 +247,6 @@ function defaultStart(item, minutes) {
 }
 
 export function editSheet(item) {
-  const { esc, overlay, I } = ui;
   const prev = item.decision?.state === 'accepted' ? item.decision.edit : null;
   const minutes = prev?.minutes || item.minutes || 60;
   const start = prev?.start || defaultStart(item, minutes);
@@ -273,7 +278,7 @@ export function editSheet(item) {
     const e = read2();
     const lines = [];
     const end = new Date(new Date(e.start).getTime() + e.minutes * 60000).toISOString();
-    const span = `${ui.when(e.start)}–${ui.time(end)}`;
+    const span = `${when(e.start)}–${time(end)}`;
     const onCal = prev?.to?.includes('calendar');
     if (e.to.includes('calendar')) lines.push(onCal ? (sameTime(prev.start, e.start) && prev.minutes === e.minutes && prev.title === e.title ? `Life calendar: no change` : `Life calendar: update to "${e.title}", ${span}`) : `Life calendar: add "${e.title}", ${span}`);
     else if (onCal) lines.push('Life calendar: remove it');
@@ -291,32 +296,32 @@ export function editSheet(item) {
     ev.stopPropagation();
     const e = read2();
     accept(item, e);
-    ui.closeTop();
-    ui.afterChange(item.key, 'accepted');
-    ui.toast(prev ? 'Saved' : `Accepted: ${e.title.length > 40 ? `${e.title.slice(0, 39)}…` : e.title}`);
+    closeTop();
+    afterChange(item.key, 'accepted');
+    toast(prev ? 'Saved' : `Accepted: ${e.title.length > 40 ? `${e.title.slice(0, 39)}…` : e.title}`);
   });
   form.querySelector('[data-act=done]')?.addEventListener('click', () => {
     const before = decisions()[item.key] || null;
-    ui.closeTop();
-    ui.markDone?.(item.id);
+    closeTop();
+    markDone(item.id);
     setDecision(item.key, { state: 'dismissed', at: nowIso(), reason: 'Done', snapshot: snapshot(item) });
     if (before?.state === 'accepted') action('life_sync', {}, 'Update the Life calendar');
     flush();
-    ui.afterChange(item.key, 'done');
-    ui.toast(`Done: ${item.title.length > 40 ? `${item.title.slice(0, 39)}…` : item.title}`, { action: 'Undo', onAction: () => {
-      ui.markUndone?.(item.id);
+    afterChange(item.key, 'done');
+    toast(`Done: ${item.title.length > 40 ? `${item.title.slice(0, 39)}…` : item.title}`, { action: 'Undo', onAction: () => {
+      markUndone(item.id);
       setDecision(item.key, before);
       if (before?.state === 'accepted') action('life_sync', {}, 'Update the Life calendar');
       flush();
-      ui.draw();
-      ui.toast('Put back');
+      draw();
+      toast('Put back');
     } });
   });
   form.querySelector('[data-act=unaccept]')?.addEventListener('click', () => {
-    ui.closeTop();
+    closeTop();
     restore(item);
-    ui.afterChange(item.key, 'restored');
-    ui.toast('Back in suggestions');
+    afterChange(item.key, 'restored');
+    toast('Back in suggestions');
   });
   return ov;
 }
@@ -324,7 +329,6 @@ export function editSheet(item) {
 const REASONS = ['Someone else is doing it', 'Not needed', 'Do later', 'Already done'];
 
 export function dismissSheet(item) {
-  const { esc, overlay } = ui;
   const ov = overlay(`<form class="stack dismiss-form">
       <p class="lead"><b>${esc(item.title)}</b></p>
       <div class="chips" role="group" aria-label="Quick reasons">${REASONS.map((r) => `<button type="button" class="chipbtn" data-reason="${esc(r)}">${esc(r)}</button>`).join('')}</div>
@@ -337,16 +341,16 @@ export function dismissSheet(item) {
     form.elements.reason.value = b.dataset.reason;
     form.querySelectorAll('.chipbtn').forEach((x) => x.classList.toggle('on', x === b));
   }));
-  form.querySelector('[data-act=cancel]').addEventListener('click', () => ui.closeTop());
+  form.querySelector('[data-act=cancel]').addEventListener('click', () => closeTop());
   form.addEventListener('submit', (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     const reason = String(form.elements.reason.value || '').trim();
     const comment = !!form.elements.comment?.checked && !!reason;
     dismiss(item, { reason, comment });
-    ui.closeTop();
-    ui.afterChange(item.key, 'dismissed');
-    ui.toast(comment ? 'Dismissed. Your reason will be posted on ClickUp.' : 'Dismissed');
+    closeTop();
+    afterChange(item.key, 'dismissed');
+    toast(comment ? 'Dismissed. Your reason will be posted on ClickUp.' : 'Dismissed');
   });
   setTimeout(() => form.elements.reason.focus({ preventScroll: true }), 50);
   return ov;
@@ -376,7 +380,6 @@ const KIND_ICON = { deadline_moved: 'calendar', deadline_new: 'calendar', room_c
   online_only: 'offline', requirement: 'alert', reply_needed: 'mail', signup: 'edit', info: 'sparkle', reminder: 'clock' };
 
 export function needToKnow(itemsList) {
-  const { esc, chip, dayShort, I } = ui;
   const rank = (i) => (i.status === 'changed' ? 1 : 0) + (i.importance || 1);
   const live = itemsList.filter((i) => i.status !== 'known').sort((a, b) => rank(b) - rank(a) || b.email_date.localeCompare(a.email_date));
   const known = itemsList.filter((i) => i.status === 'known');
@@ -391,4 +394,16 @@ export function needToKnow(itemsList) {
         : '<p class="muted">Nothing new to act on. Moved deadlines, room changes, cancellations and things to reply to or sign up for show up here.</p>'}
       ${known.length ? `<details class="fold-inline"><summary>Already known <span class="count">${known.length}</span><span class="chev">${I.chevD}</span></summary><ul class="ntks quiet">${known.slice(0, 30).map(li).join('')}</ul></details>` : ''}
     </section>`;
+}
+
+// The row slides away and the list closes up; then everything redraws.
+export function afterChange(key, kind) {
+  const rows = [...document.querySelectorAll(`#main .srow[data-key="${CSS.escape(key)}"]`)];
+  if (!rows.length || reducedMotion()) { draw(); return; }
+  for (const row of rows) {
+    row.style.height = `${row.offsetHeight}px`;
+    row.classList.add(kind === 'accepted' ? 'out-accept' : 'out-dismiss');
+    requestAnimationFrame(() => row.classList.add('collapsing'));
+  }
+  setTimeout(() => draw(), 340);
 }

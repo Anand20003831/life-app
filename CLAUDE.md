@@ -8,7 +8,9 @@ All data lives in the private repo `Anand20003831/life-data`. Its `docs/` folder
 (README, APP, ARCHITECTURE, RUNBOOK, TRAPS) explains the system; read it if this
 session can see that repo.
 
-- `app.js` screens · `gh.js` GitHub API · `ai.js` Gemini chat + tools · `md.js` renderer · `sw.js` offline cache.
+- `app.js` events · `store.js` state + sync · `shell.js` routing/drawing · `today.js` `uni.js` `mail.js` `settings.js` screens ·
+  `organise.js` suggestions · `chat.js` chat · `gh.js` GitHub API · `ai.js` Gemini · `md.js` renderer · `sw.js` offline cache.
+- Modules import each other: use imports only inside functions, never at the top level (TRAPS 27).
 - Bump `CACHE` in `sw.js` whenever any shipped file changes.
 - Test locally with a mock: set `localStorage.apiBase` to a local server that mimics
   the GitHub contents API (see TRAPS: never paste real tokens into a test browser).

@@ -486,7 +486,10 @@ function mic() {
     const box = $('.composer textarea');
     if (box) { box.value = draft; sizeBox(); }
   };
-  rec.onerror = (e) => { if (e.error !== 'aborted' && e.error !== 'no-speech') toast(`Voice: ${e.error}`); };
+  rec.onerror = (e) => {
+    const why = { 'not-allowed': 'the microphone is blocked for this site', 'audio-capture': 'no microphone was found', network: 'it needs a connection' }[e.error];
+    if (e.error !== 'aborted' && e.error !== 'no-speech') toast(`Voice input didn't work: ${why || e.error}`);
+  };
   rec.onend = () => { listening = null; paint(); };
   listening = rec;
   rec.start();
