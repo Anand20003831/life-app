@@ -231,7 +231,11 @@ document.addEventListener('submit', async (e) => {
     go('chat');
     chat.ask(q);
   } else if (a === 'savekeys') {
-    if (data.ghToken) localStorage.setItem('ghToken', data.ghToken.trim());
+    if (data.ghToken) {
+      localStorage.setItem('ghToken', data.ghToken.trim());
+      localStorage.removeItem('tokenExpiresFrom'); // a new token: its date is read again (or entered)
+    }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(data.tokenExpires || '')) localStorage.setItem('tokenExpires', data.tokenExpires);
     if (data.geminiKey) localStorage.setItem('geminiKey', data.geminiKey.trim());
     const [owner, repo] = (data.repo || '').split('/');
     if (owner && repo) { localStorage.setItem('owner', owner.trim()); localStorage.setItem('repo', repo.trim()); }
