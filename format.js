@@ -21,10 +21,11 @@ export const when = (iso) => `${dayShort(iso)}, ${time(iso)}`;
 export function until(iso) {
   const ms = new Date(iso) - Date.now();
   const h = Math.round(ms / 3600000);
-  if (ms < 0) return h > -24 ? `${-h}h ago` : `${Math.round(-h / 24)}d ago`;
+  if (ms < 0) return h > -24 ? `${Math.max(1, -h)}h ago` : `${Math.round(-h / 24)} day${Math.round(-h / 24) === 1 ? '' : 's'} ago`;
   if (h < 1) return `in ${Math.max(1, Math.round(ms / 60000))} min`;
   if (h < 36) return `in ${h}h`;
-  return `in ${Math.round(h / 24)} days`;
+  const d = Math.round(h / 24);
+  return d === 1 ? 'tomorrow' : `in ${d} days`;
 }
 
 export function ago(iso) {
@@ -33,7 +34,8 @@ export function ago(iso) {
   if (m < 1) return 'just now';
   if (m < 60) return `${m} min ago`;
   if (m < 48 * 60) return `${Math.round(m / 60)}h ago`;
-  return `${Math.round(m / 1440)}d ago`;
+  const d = Math.round(m / 1440);
+  return `${d} day${d === 1 ? '' : 's'} ago`;
 }
 
 const dayCache = new Map();

@@ -5,10 +5,16 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&
 
 export const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
+// A short buzz on tick, dismiss and hold, where the phone supports it (Android;
+// iOS Safari has no vibration API, so it's simply silent there).
+export function haptic(kind = 'tap') {
+  try { if (navigator.vibrate && !reducedMotion()) navigator.vibrate(kind === 'hold' ? [10, 40, 10] : 8); } catch { /* not allowed: fine */ }
+}
+
 let box = null;
 let timer = 0;
 
-// toast('Marked done', { action: 'Undo', onAction, ms }) — a new toast replaces the old one.
+// toast('Done: Lab 3', { action: 'Undo', onAction, ms }): a new toast replaces the old one.
 export function toast(text, { action, onAction, ms = 4000, sticky = false } = {}) {
   if (!box) {
     box = document.createElement('div');

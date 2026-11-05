@@ -41,6 +41,13 @@ export function go(tab) {
 const drawn = { tab: '', html: '' };
 // vt: animate the change with a View Transition (the selected day and the Day/Tasks
 // pill glide to their new place); falls back to a plain redraw.
+// A selector for the control that has focus, so the same one can have it after a redraw.
+function focusKey(el) {
+  if (!el || !main.contains(el) || !el.dataset?.action) return null;
+  return [`[data-action="${CSS.escape(el.dataset.action)}"]`, ...['k', 'day', 'key', 'tab', 'wf'].filter((n) => el.dataset[n] != null)
+    .map((n) => `[data-${n}="${CSS.escape(el.dataset[n])}"]`)].join('');
+}
+
 export function draw({ enter = false, vt = false } = {}) {
   if (vt && document.startViewTransition && !reducedMotion() && !document.hidden) {
     document.startViewTransition(() => paint({ enter: false, stagger: true }));
@@ -55,9 +62,18 @@ function paint({ enter = false, stagger = false } = {}) {
     if (b.dataset.tab === state.tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
   });
   document.body.dataset.tab = state.tab;
-  $('#top .brand').textContent = { today: 'Today', uni: 'Uni', mail: 'Mail', chat: 'Chat', settings: 'Settings' }[state.tab] || 'Life';
+  $('#top .brand').textContent = state.setup || !gh.configured() ? 'Life' : { today: 'Today', uni: 'Uni', mail: 'Mail', chat: 'Chat', settings: 'Settings' }[state.tab] || 'Life';
   writeRoute();
-  if (!gh.configured() && state.tab !== 'settings') { main.innerHTML = setupView(); chat.unmounted(); return; }
+  if (!gh.configured()) state.setup = true; // stays on until Finish, so the last step isn't skipped
+  const setup = Boolean(state.setup); // toggle(x, undefined) would flip the class, not set it
+  document.body.classList.toggle('setup-mode', setup);
+  if (setup) {
+    const html = setupView();
+    if (drawn.html !== html) { main.innerHTML = html; drawn.html = html; drawn.tab = 'setup'; }
+    chat.unmounted();
+    main.querySelector('input:not([type=hidden])')?.focus({ preventScroll: true });
+    return;
+  }
   const view = { today: todayView, uni: uniView, mail: mailView, chat: chat.view, settings: settingsView }[state.tab];
   const html = view();
   // Same screen, same HTML: leave the DOM alone (no repaint, nothing re-created,
@@ -65,7 +81,9 @@ function paint({ enter = false, stagger = false } = {}) {
   if (state.tab !== 'chat' && !enter && html === drawn.html && drawn.tab === state.tab && main.firstChild) return;
   drawn.html = html;
   drawn.tab = state.tab;
+  const focused = focusKey(document.activeElement);
   main.innerHTML = html;
+  if (focused) main.querySelector(focused)?.focus({ preventScroll: true }); // a redraw never steals keyboard focus
   main.querySelectorAll('details[data-fold]').forEach((d) => { d.open = folds.has(d.dataset.fold); });
   if (stagger && !reducedMotion()) { main.classList.remove('stagger'); void main.offsetWidth; main.classList.add('stagger'); }
   if (enter && !reducedMotion()) { main.classList.remove('enter'); void main.offsetWidth; main.classList.add('enter'); }

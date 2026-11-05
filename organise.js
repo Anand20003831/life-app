@@ -190,13 +190,13 @@ export function row(r) {
   }
   if (r.state === 'dismissed') {
     return `<li class="srow dismissed" data-key="${esc(r.key)}"><div class="srow-main static">
-      <span class="trow-title">${esc(r.title)}</span>
+      <span class="trow-title">${esc(r.title || 'Untitled')}</span>
       <span class="trow-meta"><span class="reason">${r.decision?.reason ? esc(r.decision.reason) : 'Dismissed'}</span>${r.decision?.comment ? '<span class="muted">· posted on ClickUp</span>' : ''}</span></div>
-      <button class="ghost sm" data-action="restore-item" data-key="${esc(r.key)}">Restore</button></li>`;
+      <button class="ghost sm" data-action="restore-item" data-key="${esc(r.key)}" aria-label="Restore ${esc(r.title)}">Restore</button></li>`;
   }
   return `<li class="srow" data-key="${esc(r.key)}">
     <div class="srow-main static">
-      <span class="trow-title">${esc(r.title)}</span>
+      <span class="trow-title">${esc(r.title || 'Untitled')}</span>
       <span class="trow-meta">${chip(r.module)}<span class="when${late ? ' soon' : ''}">${r.due ? until(r.due) : ''}</span><span class="muted">· ${esc(meta)}</span>${r.url ? `<a class="src" href="${esc(r.url)}" target="_blank" rel="noopener">ClickUp</a>` : ''}</span>
       ${r.returned ? `<span class="returned">${I.retry}Back: ${esc(r.returned.why)}${r.returned.reason ? ` (you said: ${esc(r.returned.reason)})` : ''}</span>` : ''}
     </div>

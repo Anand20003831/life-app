@@ -19,6 +19,7 @@ export function overlay(html, { title = '', download = '', full = false } = {}) 
       ${download ? `<button class="icon" data-action="download" data-name="${esc(download)}" aria-label="Download">${I.download}</button>` : ''}
       <button class="icon" data-action="close" aria-label="Close">${I.x}</button></div>
     <div class="body">${html}</div></div>`;
+  el.opener = document.activeElement; // focus goes back here when the sheet closes
   document.body.append(el);
   document.body.classList.add('sheet-open');
   history.pushState({ sheet: (history.state?.sheet || 0) + 1 }, '');
@@ -35,9 +36,26 @@ export function closeTop({ fromHistory = false } = {}) {
   setTimeout(() => {
     el.remove();
     if (!document.querySelector('.overlay')) document.body.classList.remove('sheet-open');
+    if (el.opener?.isConnected) el.opener.focus({ preventScroll: true });
   }, reducedMotion() ? 0 : 180);
   return true;
 }
+
+// Tab stays inside the open sheet (it's modal); Escape closes it.
+document.addEventListener('keydown', (e) => {
+  const all = document.querySelectorAll('.overlay:not(.closing)');
+  const top = all[all.length - 1];
+  if (!top) return;
+  if (e.key === 'Escape') { e.preventDefault(); closeTop(); return; }
+  if (e.key !== 'Tab') return;
+  const items = [...top.querySelectorAll('a[href], button:not([disabled]), input:not([type=hidden]):not([disabled]), select, textarea, summary, [tabindex]:not([tabindex="-1"])')]
+    .filter((x) => x.offsetParent !== null);
+  if (!items.length) return;
+  const [first, last] = [items[0], items[items.length - 1]];
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  else if (!top.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+});
 
 export async function openFile(path, title) {
   const name = path.split('/').pop().replace(/\.chunks\.json$/, '');

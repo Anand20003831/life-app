@@ -112,7 +112,7 @@ function heroCard(rows) {
   }
   const label = live ? `Now · until ${time(r.end)}` : `Next · ${until(r.start)}`;
   return `<section class="hero${rail(r.mod)}${live ? ' live' : ''}"><span class="eyebrow">${label}</span>
-    <p class="hero-title">${r.plan ? '▸ ' : ''}${esc(r.title)}</p>
+    <p class="hero-title">${r.plan ? '▸ ' : ''}${esc(r.title || 'Busy')}</p>
     <p class="hero-meta">${time(r.start)}–${time(r.end)}${r.location ? ` · ${esc(shortRoom(r.location))}` : ''} ${chip(r.mod)}</p>
     ${r.first_step ? `<p class="hero-step">Start with: ${esc(r.first_step)}</p>` : ''}</section>`;
 }
@@ -206,7 +206,7 @@ export function todayView() {
     return `<li class="ag ${r.kind}${r.suggested ? ' suggested' : ''}${rail(r.mod)}${live ? ' live' : ''}${past ? ' past' : ''}">
       <time>${r.allDay ? 'all day' : time(r.start)}${r.end && !r.allDay && !r.dueItem && dayOf(r.end) === dayOf(r.start) ? `<span>${time(r.end)}</span>` : ''}</time>
       <span class="tile">${r.dueItem ? I.clock : tileFor(r)}</span>
-      <span class="ag-text"><b>${esc(r.title)}</b><span class="ag-meta">${chip(r.mod)}${sub ? `<span>${esc(sub)}</span>` : ''}${live ? '<span class="now">now</span>' : ''}</span>
+      <span class="ag-text"><b>${esc(r.title || 'Busy')}</b><span class="ag-meta">${chip(r.mod)}${sub ? `<span>${esc(sub)}</span>` : ''}${live ? '<span class="now">now</span>' : ''}</span>
       ${r.first_step && !past ? `<span class="ag-step">Start with: ${esc(r.first_step)}</span>` : ''}</span></li>`;
   }).join('')}</ol>` : `<p class="muted">${isToday ? 'Nothing else on today.' : 'Nothing on this day.'}</p>`}</section>`);
   day.push(`<form class="ask" data-action="ask"><input name="q" placeholder="Tell it something…" autocomplete="off" aria-label="Tell the organiser something">

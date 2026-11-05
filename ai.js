@@ -9,8 +9,9 @@
 
 import * as gh from './gh.js';
 
-// geminiBase is a local-testing hook (a mock server); unset in real use.
-const API = localStorage.getItem('geminiBase') || 'https://generativelanguage.googleapis.com/v1beta';
+// geminiBase is a local-testing hook (a mock server on this machine), ignored
+// unless it points at localhost: the key only ever goes to Google.
+const API = gh.localOnly(localStorage.getItem('geminiBase')) || 'https://generativelanguage.googleapis.com/v1beta';
 const TZ = 'Europe/London';
 
 export const settings = {
@@ -42,8 +43,8 @@ async function call(path, body, signal) {
 
 // Models this key can actually use, newest first, Flash before Pro before Lite.
 let modelCache = null;
-export async function models() {
-  if (modelCache) return modelCache;
+export async function models({ fresh = false } = {}) {
+  if (modelCache && !fresh) return modelCache;
   const got = await call('models?pageSize=200');
   const ok = (got.models || [])
     .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))

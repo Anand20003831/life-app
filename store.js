@@ -23,6 +23,7 @@ export const state = {
   jobs: [],        // delegated jobs, queued and finished
   pendingLoaded: false,
   status: { kind: 'idle' }, // idle | loading | ok | offline | error | auth
+  setup: false,    // the first-run walk-through is showing
 };
 
 // <details data-fold> sections left open, remembered on this device

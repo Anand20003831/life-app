@@ -18,13 +18,14 @@ import * as gh from './gh.js';
 import * as ai from './ai.js';
 import * as chat from './chat.js';
 import { render as md } from './md.js';
-import { toast, reducedMotion } from './ui.js';
+import { toast, reducedMotion, haptic } from './ui.js';
 import * as org from './organise.js';
 import { $, state, folds, fromCache, refresh, loadJobs, savePending, setDot } from './store.js';
 import { addDays, ago, londonDate, mondayOf, short } from './format.js';
 import { draw, go, readRoute } from './shell.js';
 import { clickupItems } from './uni.js';
 import { closeTop, delegateDialog, openFile, resolvePath } from './sheets.js';
+import { setupClick, setupSubmit, startSetup } from './settings.js';
 import { pullRefresh } from './gestures.js';
 
 const main = document.getElementById('main');
@@ -57,7 +58,22 @@ document.addEventListener('click', async (e) => {
   const el = e.target.closest('[data-action]');
   if (!el || el.tagName === 'FORM' || el.tagName === 'SELECT') return;
   const a = el.dataset.action;
-  if (a === 'tab') go(el.dataset.tab);
+  if (setupClick(a)) { draw(); window.scrollTo(0, 0); return; }
+  if (a === 'setup-done') {
+    state.setup = false;
+    haptic();
+    go('today');
+    draw();
+    toast('All set. Loading your data…');
+    refresh();
+  } else if (a === 'setup-again') { startSetup(); draw(); window.scrollTo(0, 0); }
+  else if (a === 'forget-keys') {
+    toast('Remove the keys from this device?', { action: 'Remove', onAction: () => {
+      ['ghToken', 'geminiKey', 'owner', 'repo', 'lastSync', 'pending', 'models'].forEach((k) => localStorage.removeItem(k));
+      gh.clearCache();
+      startSetup(); draw();
+    } });
+  } else if (a === 'tab') go(el.dataset.tab);
   else if (a === 'todayTab') {
     state.todayTab = el.dataset.k; localStorage.setItem('todayTab', state.todayTab);
     draw({ vt: true });
@@ -74,12 +90,14 @@ document.addEventListener('click', async (e) => {
   } else if (a === 'accept-item' || a === 'edit-item') {
     const item = findItem(el.dataset.key);
     if (!item) return;
+    haptic();
     if (a === 'accept-item' && !reducedMotion()) el.classList.add('pop');
     org.editSheet(item);
   } else if (a === 'dismiss-item') {
     if (holdFired) { holdFired = false; return; } // a long press already opened the reason sheet
     const item = findItem(el.dataset.key);
     if (!item) return;
+    haptic();
     org.dismiss(item);
     org.afterChange(item.key, 'dismissed');
     toast(`Dismissed: ${short(item.title)}`, { action: 'Undo', onAction: () => { org.restore(item); draw(); toast('Back in suggestions'); } });
@@ -154,7 +172,7 @@ document.addEventListener('pointerdown', (e) => {
   const el = e.target.closest('[data-action=dismiss-item]');
   if (!el) return;
   holdFired = false;
-  org.holdStart(el, () => { holdFired = true; const item = findItem(el.dataset.key); if (item) org.dismissSheet(item); });
+  org.holdStart(el, () => { holdFired = true; haptic('hold'); const item = findItem(el.dataset.key); if (item) org.dismissSheet(item); });
 });
 ['pointerup', 'pointercancel', 'pointerleave'].forEach((t) => document.addEventListener(t, (e) => {
   if (e.type === 'pointerleave' && !e.target.closest?.('[data-action=dismiss-item]')) return;
@@ -184,7 +202,17 @@ document.addEventListener('toggle', (e) => {
   }
 }, true);
 
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && document.querySelector('.overlay')) closeTop(); });
+// Arrow keys move between tabs in a tab row (week days, Day/Tasks, Uni, Mail).
+document.addEventListener('keydown', (e) => {
+  const tab = e.target.closest?.('[role=tab]');
+  if (!tab || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+  const tabs = [...tab.closest('[role=tablist]').querySelectorAll('[role=tab]:not([disabled])')];
+  const i = tabs.indexOf(tab);
+  const next = tabs[e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : (i + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length];
+  e.preventDefault();
+  next.focus();
+  next.click(); // the redraw keeps focus on this tab (shell.js)
+});
 
 document.addEventListener('submit', async (e) => {
   const form = e.target;
@@ -192,6 +220,7 @@ document.addEventListener('submit', async (e) => {
   e.preventDefault();
   const a = form.dataset.action;
   const data = Object.fromEntries(new FormData(form));
+  if (a === 'setup-step') { await setupSubmit(form, data, () => draw()); window.scrollTo(0, 0); return; }
   if (a === 'ask') {
     const q = (data.q || '').trim();
     if (!q) return;

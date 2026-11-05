@@ -60,7 +60,7 @@ export function taskRow(d) {
   const meta = [d.source === 'clickup' ? (d.mine === false ? 'team' : 'yours') : d.source === 'moodle' ? 'Moodle' : null, when(d.due)].filter(Boolean).join(' · ');
   return `<li class="trow" data-row="${esc(d.id || '')}">
     <button class="trow-main" data-action="expand" aria-expanded="false">
-      <span class="trow-title">${esc(d.title)}</span>
+      <span class="trow-title">${esc(d.title || 'Untitled deadline')}</span>
       <span class="trow-meta">${chip(d.module)}<span class="when${soon ? ' soon' : ''}">${until(d.due)}</span>${d.moved ? '<span class="tag">moved by email</span>' : ''}<span class="muted">· ${esc(meta)}</span></span></button>
     <div class="trow-acts">${d.url ? `<a class="btn ghost sm" href="${esc(d.url)}" target="_blank" rel="noopener">${I.open}Open</a>` : ''}
       <button class="ghost sm" data-action="delegate" data-task='${esc(JSON.stringify({ title: d.title, source: d.source, module: d.module, due: d.due, url: d.url }))}'>${I.delegate}Delegate</button></div></li>`;

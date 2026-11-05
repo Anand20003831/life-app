@@ -23,12 +23,12 @@ function deadlinesPane() {
   const team = (state.data.clickup?.tasks || []).filter((t) => !t.done && t.due && /key dates/i.test(t.list || ''))
     .map((t) => ({ title: t.name, due: t.due, url: t.url, source: 'clickup', module: 'COMP2002', mine: t.mine }));
   const all = [...moodle, ...team].filter((d) => new Date(d.due) > Date.now() - 864e5).sort((a, b) => new Date(a.due) - new Date(b.due));
-  return all.length ? taskCard('Upcoming', all) : empty(I.calendar, 'No deadlines coming up', 'Moodle deadlines and the group\'s ClickUp key dates show here. Moodle is checked at 8am and 6pm.');
+  return all.length ? taskCard('Upcoming', all) : empty(I.calendar, 'No deadlines coming up', 'Moodle deadlines and the group\'s ClickUp key dates show here. Moodle is checked at 08:00 and 18:00.');
 }
 
 function lecturesPane() {
   const lec = state.data.lectures || [];
-  if (!lec.length) return empty(I.book, 'No lectures yet', 'Recordings appear here after the 8am and 6pm sync, with study notes and the transcript.');
+  if (!lec.length) return empty(I.book, 'No lectures yet', 'Recordings appear here after the 08:00 and 18:00 sync, with study notes and the transcript.');
   return `<ul class="list">${lec.map((l) => `<li><button class="li-btn" data-action="open" data-path="${esc(l.path)}" data-title="${esc(l.name)}">
     <span class="li-head"><b>${esc(l.name)}</b>${chip(l.module)}</span>
     <span class="muted small">${dayShort(l.date)} · ${(l.notes || 0) >= 2 ? '<span class="tag done">Study notes</span>' : l.summarised ? '<span class="tag plain">Summary</span>' : '<span class="tag plain">Transcript only</span>'}</span>
