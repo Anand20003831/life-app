@@ -18,7 +18,7 @@ export function readRoute() {
   const [tab, sub] = location.hash.slice(1).split('/');
   if (!['today', 'uni', 'mail', 'chat', 'settings'].includes(tab)) return false;
   state.tab = tab;
-  if (tab === 'uni' && ['deadlines', 'lectures', 'group', 'modules', 'jobs'].includes(sub)) state.uniTab = sub;
+  if (tab === 'uni' && ['deadlines', 'lectures', 'revise', 'group', 'modules', 'jobs'].includes(sub)) state.uniTab = sub;
   if (tab === 'today' && ['day', 'tasks'].includes(sub)) state.todayTab = sub;
   if (tab === 'mail' && ['important', 'forum', 'noise'].includes(sub)) state.mailTab = sub;
   return true;

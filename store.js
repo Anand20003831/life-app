@@ -6,6 +6,7 @@
 
 import * as gh from './gh.js';
 import * as org from './organise.js';
+import * as revise from './revise.js';
 import { ago } from './format.js';
 import { draw } from './shell.js';
 
@@ -34,7 +35,7 @@ export const FILES = {
   courses: 'uni/courses.json', mail: 'uni/email/index.json', clickup: 'schedule/clickup.json',
   runs: 'state/runs.json', health: 'state/health.json', todos: 'schedule/todos.json', calendar: 'schedule/calendar.json',
   plan: 'schedule/plan.json', skipped: 'schedule/skipped.json', suggestions: 'schedule/suggestions.json',
-  decisions: 'schedule/decisions.json', ntk: 'uni/email/items.json',
+  decisions: 'schedule/decisions.json', ntk: 'uni/email/items.json', questions: 'uni/questions.json', revision: 'uni/revision.json',
 };
 
 export function fromCache() {
@@ -65,6 +66,7 @@ export async function refresh() {
       if (!navigator.onLine) throw new TypeError('offline');
       await gh.checkAccess();
       await org.flush(); // choices made offline go first, so what's read back includes them
+      await revise.flush();
       const got = await Promise.all(Object.entries(FILES).map(async ([k, p]) => [k, await gh.readJSON(p, null)]));
       for (const [k, v] of got) state.data[k] = v;
       await Promise.all([loadPending(), loadJobs()]);

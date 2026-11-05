@@ -694,3 +694,32 @@ body.setup-mode nav.tabs { display: none; }
 .health-ok summary { color: var(--ink); font-weight: 500; font-size: var(--fs-body); }
 .health-ok summary .hdot.ok { width: 10px; height: 10px; border-radius: 50%; background: var(--good); flex: none; }
 .health-ok .health { border-top: 1px solid var(--line); }
+
+/* ---------------------------------------------------------------- Uni → Revise */
+.seg .badge { margin-left: 4px; }
+.rv-due { display: flex; align-items: baseline; gap: var(--s2); margin-bottom: var(--s3); }
+.rv-n { font-size: 40px; font-weight: 700; line-height: 1; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.rv-due span:last-child { color: var(--ink-2); }
+.rv-filter { display: flex; flex-wrap: wrap; gap: var(--s2); margin-bottom: var(--s4); }
+.rv-filter .chipbtn.on { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.rv-filter .chipbtn .count { color: inherit; background: none; opacity: 1; font-weight: 500; margin-left: 2px; padding: 0; font-variant-numeric: tabular-nums; }
+.rv-go { width: 100%; justify-content: center; gap: var(--s2); min-height: 48px; font-size: var(--fs-lg); }
+.rv-clear { display: flex; gap: var(--s2); align-items: center; font-weight: 600; margin: 0 0 var(--s2); }
+.rv-clear svg.ic { color: var(--good); }
+.rv-note { margin: var(--s2) var(--s1); }
+.rv-top { display: flex; align-items: center; gap: var(--s3); }
+.rv-bar { flex: 1; height: 4px; border-radius: 2px; background: var(--line-2); overflow: hidden; }
+.rv-bar i { display: block; height: 100%; background: var(--ink); transition: width .2s ease; }
+.rv-meta { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; margin: var(--s3) 0 var(--s2); font-size: var(--fs-sm); }
+.rv-meta .link { padding: 0; min-height: 32px; text-align: left; overflow-wrap: anywhere; }
+.rv-q { font-size: var(--fs-lg); font-weight: 600; line-height: 1.45; }
+.rv-q p { margin: 0 0 var(--s3); }
+.rv-a { border-top: 1px solid var(--line); margin-top: var(--s2); padding-top: var(--s3); }
+.rv-a .eyebrow { display: block; margin-bottom: var(--s1); }
+.rv-show { width: 100%; justify-content: center; min-height: 48px; margin-top: var(--s2); }
+.rv-grade { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--s2); margin-top: var(--s4); }
+.rv-grade button { flex-direction: column; gap: 2px; min-height: 56px; justify-content: center; }
+.rv-grade small { font-size: var(--fs-cap); font-weight: 500; opacity: .85; }
+.rv-done h2 { display: flex; align-items: center; gap: var(--s2); }
+.rv-done h2 svg.ic { color: var(--good); }
+@media (prefers-reduced-motion: reduce) { .rv-bar i { transition: none; } }

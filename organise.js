@@ -175,7 +175,7 @@ function clickupChange(item, edit, before) {
 
 // ---------------------------------------------------------------- rows
 
-const LABEL = { clickup: 'ClickUp', todo: 'To-do', checkpoint: 'Checkpoint', plan: 'Plan', accepted: 'Accepted' };
+const LABEL = { clickup: 'ClickUp', todo: 'To-do', checkpoint: 'Checkpoint', plan: 'Plan', revise: 'Revision', accepted: 'Accepted' };
 
 export function row(r) {
   const meta = [LABEL[r.source] || r.source, r.due ? when(r.due) : null, r.for ? `for ${r.for}` : null].filter(Boolean).join(' · ');
@@ -197,7 +197,7 @@ export function row(r) {
   return `<li class="srow" data-key="${esc(r.key)}">
     <div class="srow-main static">
       <span class="trow-title">${esc(r.title || 'Untitled')}</span>
-      <span class="trow-meta">${chip(r.module)}<span class="when${late ? ' soon' : ''}">${r.due ? until(r.due) : ''}</span><span class="muted">· ${esc(meta)}</span>${r.url ? `<a class="src" href="${esc(r.url)}" target="_blank" rel="noopener">ClickUp</a>` : ''}</span>
+      <span class="trow-meta">${chip(r.module)}<span class="when${late ? ' soon' : ''}">${r.due ? until(r.due) : ''}</span><span class="muted">· ${esc(meta)}</span>${r.url ? `<a class="src" href="${esc(r.url)}" target="_blank" rel="noopener">ClickUp</a>` : ''}${r.source === 'revise' ? '<a class="src" href="#uni/revise">Open Revise</a>' : ''}</span>
       ${r.returned ? `<span class="returned">${I.retry}Back: ${esc(r.returned.why)}${r.returned.reason ? ` (you said: ${esc(r.returned.reason)})` : ''}</span>` : ''}
     </div>
     <div class="srow-acts">

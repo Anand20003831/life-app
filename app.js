@@ -27,6 +27,7 @@ import { clickupItems } from './uni.js';
 import { closeTop, delegateDialog, openFile, resolvePath } from './sheets.js';
 import { setupClick, setupSubmit, startSetup } from './settings.js';
 import { pullRefresh } from './gestures.js';
+import * as revise from './revise.js';
 
 const main = document.getElementById('main');
 
@@ -59,6 +60,7 @@ document.addEventListener('click', async (e) => {
   if (!el || el.tagName === 'FORM' || el.tagName === 'SELECT') return;
   const a = el.dataset.action;
   if (setupClick(a)) { draw(); window.scrollTo(0, 0); return; }
+  if (revise.onAction(a, el)) return;
   if (a === 'setup-done') {
     state.setup = false;
     haptic();

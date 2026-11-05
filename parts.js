@@ -4,6 +4,7 @@
 import { esc } from './md.js';
 import { I } from './icons.js';
 import * as org from './organise.js';
+import * as revise from './revise.js';
 import { state, firstLoad } from './store.js';
 import { ago, chip, until, when } from './format.js';
 
@@ -32,7 +33,7 @@ export function statusNote() {
   const retry = `<button class="link" data-action="refresh">Retry</button>`;
   if (s.kind === 'offline') {
     if (!saved) return ''; // nothing to show: the screen's own offline panel says so
-    const queued = org.pending();
+    const queued = org.pending() + revise.pending();
     return `<div class="note" role="status">${I.offline}<span>Offline · showing what was saved ${ago(saved)}${queued ? ` · ${queued} change${queued > 1 ? 's' : ''} will sync when you're back` : ''}</span>${retry}</div>`;
   }
   if (s.kind === 'error') {

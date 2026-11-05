@@ -1,4 +1,4 @@
-// Uni: deadlines, lectures, the group's ClickUp board, modules and delegated jobs.
+// Uni: deadlines, lectures, revision, the group's ClickUp board, modules and delegated jobs.
 
 import { esc } from './md.js';
 import { I } from './icons.js';
@@ -6,15 +6,18 @@ import * as org from './organise.js';
 import { state } from './store.js';
 import { ago, chip, dayShort, rail } from './format.js';
 import { blocked, empty, firstLoad, skeleton, statusNote, taskCard } from './parts.js';
+import * as revise from './revise.js';
 
 export function uniView() {
-  const tabs = [['deadlines', 'Deadlines'], ['lectures', 'Lectures'], ['group', 'Group'], ['modules', 'Modules'], ['jobs', 'Jobs']];
+  const due = revise.dueCount();
+  const tabs = [['deadlines', 'Deadlines'], ['lectures', 'Lectures'], ['revise', `Revise${due ? ` <span class="badge" aria-label="${due} due today">${due}</span>` : ''}`],
+    ['group', 'Group'], ['modules', 'Modules'], ['jobs', 'Jobs']];
   const seg = `<div class="seg" role="tablist" aria-label="Uni">${tabs.map(([k, l]) => `<button role="tab" aria-selected="${state.uniTab === k}" class="${state.uniTab === k ? 'on' : ''}" data-action="uniTab" data-k="${k}">${l}</button>`).join('')}</div>`;
-  const need = { deadlines: 'deadlines', lectures: 'lectures', group: 'clickup', modules: 'courses', jobs: null }[state.uniTab];
+  const need = { deadlines: 'deadlines', lectures: 'lectures', revise: 'questions', group: 'clickup', modules: 'courses', jobs: null }[state.uniTab];
   let body;
   if (need && state.data[need] == null && firstLoad()) body = skeleton('list', 4);
   else if (need && state.data[need] == null && blocked()) body = blocked();
-  else body = ({ deadlines: deadlinesPane, lectures: lecturesPane, group: groupPane, modules: modulesPane, jobs: jobsPane }[state.uniTab])();
+  else body = ({ deadlines: deadlinesPane, lectures: lecturesPane, revise: revise.view, group: groupPane, modules: modulesPane, jobs: jobsPane }[state.uniTab])();
   return statusNote() + seg + `<div class="pane">${body}</div>`;
 }
 
