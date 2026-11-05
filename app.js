@@ -843,26 +843,6 @@ async function busy(el, label, fn) {
   try { return await fn(); } finally { el.disabled = false; el.classList.remove('working'); el.innerHTML = was; }
 }
 
-async function markDone(el) {
-  const { id, title } = el.dataset;
-  state.hidden.add(id);
-  const row = el.closest('li');
-  row?.classList.add('leaving');
-  setTimeout(() => draw(), reducedMotion() ? 0 : 200);
-  try {
-    await ai.markDone(id);
-    toast(`Done: ${title}`, { action: 'Undo', onAction: async () => {
-      state.hidden.delete(id);
-      draw();
-      try { await ai.markUndone(id); toast('Put back'); } catch (err) { toast(`Couldn't undo: ${err.message}`); }
-    } });
-  } catch (err) {
-    state.hidden.delete(id);
-    draw();
-    toast(`Couldn't mark it done: ${err.message}`);
-  }
-}
-
 document.addEventListener('click', async (e) => {
   // links inside rendered markdown that point at repo files (they have no data-action)
   const link = e.target.closest('a[data-path]');
@@ -933,8 +913,6 @@ document.addEventListener('click', async (e) => {
     const blob = new Blob([body.dataset.text || body.innerText], { type: 'text/plain' });
     Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: el.dataset.name }).click();
     toast(`Saved ${el.dataset.name}`);
-  } else if (a === 'done') {
-    markDone(el);
   } else if (a === 'replan') {
     await busy(el, 'Starting…', async () => {
       try { await gh.dispatch('pulse.yml', { plan_now: 'true' }); toast('Re-planning the week. The new plan lands in a few minutes.'); }
@@ -1109,6 +1087,7 @@ org.init({
   esc, chip, when, until, dayShort, time, I, toast, overlay, closeTop, draw, afterChange,
   data: () => state.data, reducedMotion,
   markDone: (id) => id && ai.markDone(id).catch(() => {}),
+  markUndone: (id) => id && ai.markUndone(id).catch(() => {}),
 });
 chat.init({
   draw, refresh, tab: () => state.tab, data: () => state.data, go,

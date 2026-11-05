@@ -297,28 +297,29 @@ async function turn({ text, again = null, reuse = [] }) {
     t = threads.blank(currentModel() || ai.settings.model, ai.settings.effort);
     localStorage.setItem('chatCurrent', t.id);
   }
+  const th = t; // this turn's chat, even if another is opened while it finishes
   const attached = again ? [] : files;
   let parts = again;
   if (!parts) {
     parts = await userParts(text, attached);
     if (!parts.length) return;
-    t.shown.push({ id: gh.id(), role: 'user', text, at: new Date().toISOString(),
+    th.shown.push({ id: gh.id(), role: 'user', text, at: new Date().toISOString(),
                    files: attached.map((f) => ({ name: f.name, type: f.type, size: f.size, thumb: f.thumb })) });
     files = [];
     draft = '';
   }
-  t._lastParts = parts;
-  const firstText = t.shown.find((m) => m.role === 'user')?.text || text || '';
-  const naming = !t.titled ? ai.titleFor(firstText || 'files').catch(() => null) : null;
-  t.others = list.filter((e) => e.id !== t.id);
+  th._lastParts = parts;
+  const firstText = th.shown.find((m) => m.role === 'user')?.text || text || '';
+  const naming = !th.titled ? ai.titleFor(firstText || 'files').catch(() => null) : null;
+  th.others = list.filter((e) => e.id !== th.id);
   live = { text: '', tools: [], model: currentModel(), note: '' };
   ctrl = new AbortController();
   paint();
   scrollDown(true);
   let res;
   try {
-    res = await ai.send(t, parts, {
-      model: currentModel(), effort: t.effort || ai.settings.effort, signal: ctrl.signal, reuse,
+    res = await ai.send(th, parts, {
+      model: currentModel(), effort: th.effort || ai.settings.effort, signal: ctrl.signal, reuse,
       on: {
         text: (full) => { live.text = full; liveUpdate(); },
         tool: ({ name, args, result }) => {
@@ -335,35 +336,35 @@ async function turn({ text, again = null, reuse = [] }) {
     });
   } catch (err) {
     // a failed turn leaves nothing half-done in the history; Regenerate retries it
-    const i = ai.lastUserTurn(t.history);
-    if (i >= 0 && i === t.history.length - 1) t.history.pop();
-    t.shown.push({ id: gh.id(), role: 'model', error: true, text: `**Couldn't answer:** ${err.message}`, at: new Date().toISOString() });
+    const i = ai.lastUserTurn(th.history);
+    if (i >= 0 && i === th.history.length - 1) th.history.pop();
+    th.shown.push({ id: gh.id(), role: 'model', error: true, text: `**Couldn't answer:** ${err.message}`, at: new Date().toISOString() });
     live = null; ctrl = null;
     paint();
     return;
   }
-  t.shown.push({ id: gh.id(), role: 'model', text: res.reply, at: new Date().toISOString(), model: res.model, note: live.note,
+  th.shown.push({ id: gh.id(), role: 'model', text: res.reply, at: new Date().toISOString(), model: res.model, note: live.note,
                  tools: res.tools, proposed: res.proposed.map((a) => ({ ...a })), stopped: res.stopped || undefined });
   if (res.proposed.length) app.setPending([...app.pending(), ...res.proposed]);
   live = null; ctrl = null;
   if (naming) {
     const name = await Promise.race([naming, new Promise((r) => setTimeout(() => r(null), 6000))]);
-    t.title = name || firstText.replace(/\s+/g, ' ').slice(0, 40) || 'Chat';
-    t.titled = true;
+    th.title = name || firstText.replace(/\s+/g, ' ').slice(0, 40) || 'Chat';
+    th.titled = true;
   }
-  if (t.model !== res.model && !t.model) t.model = res.model;
+  if (th.model !== res.model && !th.model) th.model = res.model;
   paint();
   scrollDown();
-  await persist();
-  archive(t.shown.slice(-2)).catch(() => {});
+  await persist(th);
+  archive(th.shown.slice(-2)).catch(() => {});
   if (res.tools.some((x) => /remember|schedule|todo|skip|calendar/.test(x.name))) app.refresh();
 }
 
-async function persist() {
+async function persist(th = t) {
   try {
-    await threads.save(t);
-    list = [threads.cachedIndex().find((e) => e.id === t.id) || { id: t.id, title: t.title, updated: t.updated, pinned: t.pinned },
-            ...list.filter((e) => e.id !== t.id)];
+    await threads.save(th);
+    list = [threads.cachedIndex().find((e) => e.id === th.id) || { id: th.id, title: th.title, updated: th.updated, pinned: th.pinned },
+            ...list.filter((e) => e.id !== th.id)];
     if (drawer) paintDrawer();
   } catch (err) { toast(`Not saved to the repo yet: ${err.message}`); }
 }

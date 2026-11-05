@@ -17,7 +17,7 @@
   --m0: #2a58b8; --m1: #a33d0d; --m2: #0b6b50; --m3: #7340b5; --m4: #a9286d; --m5: #715a00;
   --chip-mix: 12%;
   --shadow: 0 1px 2px rgba(0, 0, 0, .05);
-  --hdr: rgba(245, 245, 245, .86);
+  --hdr: rgba(245, 245, 245, .94);
   --scrim: rgba(0, 0, 0, .4);
   /* 4/8 spacing scale */
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
@@ -37,7 +37,7 @@
     --m0: #94acd8; --m1: #d8a68a; --m2: #7fbfa5; --m3: #b6a5dc; --m4: #d79dbc; --m5: #cbb97c;
     --chip-mix: 14%;
     --shadow: none;
-    --hdr: rgba(15, 15, 15, .86);
+    --hdr: rgba(15, 15, 15, .94);
     --scrim: rgba(0, 0, 0, .6);
   }
 }

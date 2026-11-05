@@ -296,12 +296,21 @@ export function editSheet(item) {
     ui.toast(prev ? 'Saved' : `Accepted: ${e.title.length > 40 ? `${e.title.slice(0, 39)}…` : e.title}`);
   });
   form.querySelector('[data-act=done]')?.addEventListener('click', () => {
+    const before = decisions()[item.key] || null;
     ui.closeTop();
     ui.markDone?.(item.id);
     setDecision(item.key, { state: 'dismissed', at: nowIso(), reason: 'Done', snapshot: snapshot(item) });
+    if (before?.state === 'accepted') action('life_sync', {}, 'Update the Life calendar');
     flush();
     ui.afterChange(item.key, 'done');
-    ui.toast(`Done: ${item.title.length > 40 ? `${item.title.slice(0, 39)}…` : item.title}`);
+    ui.toast(`Done: ${item.title.length > 40 ? `${item.title.slice(0, 39)}…` : item.title}`, { action: 'Undo', onAction: () => {
+      ui.markUndone?.(item.id);
+      setDecision(item.key, before);
+      if (before?.state === 'accepted') action('life_sync', {}, 'Update the Life calendar');
+      flush();
+      ui.draw();
+      ui.toast('Put back');
+    } });
   });
   form.querySelector('[data-act=unaccept]')?.addEventListener('click', () => {
     ui.closeTop();
