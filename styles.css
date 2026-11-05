@@ -266,11 +266,13 @@ button.danger { background: var(--bad); color: var(--accent-ink); }
 /* ---------- reader sheet: the elevated surface */
 .overlay { position: fixed; inset: 0; z-index: 5; background: var(--scrim); display: flex; align-items: flex-end; justify-content: center; }
 .sheet { position: relative; background: var(--sheet); width: 100%; max-width: 760px; max-height: 94dvh; overflow-y: auto;
-  border-radius: 20px 20px 0 0; padding: var(--s3) var(--s4) calc(var(--s6) + env(safe-area-inset-bottom)); overscroll-behavior: contain;
+  border-radius: 20px 20px 0 0; padding: 0 var(--s4) calc(var(--s6) + env(safe-area-inset-bottom)); overscroll-behavior: contain;
   border-top: 1px solid var(--line-2); }
 .sheet .card, .sheet .list li { background: var(--raised); }
 .sheet-bar { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: var(--s1);
-  margin: calc(-1 * var(--s3)) calc(-1 * var(--s4)) var(--s2); padding: var(--s2) var(--s2) var(--s2) var(--s4);
+  /* flush with the sheet's top edge: a sticky bar sticks inside its container's padding,
+     so any padding above it would leave a strip where text scrolls past (no top padding) */
+  margin: 0 calc(-1 * var(--s4)) var(--s2); padding: calc(var(--s2) + var(--s3) / 2) var(--s2) var(--s2) var(--s4);
   background: var(--sheet); border-bottom: 1px solid var(--line); }
 .sheet-title { flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .close { position: sticky; top: 0; float: right; z-index: 1; width: var(--tap); padding: 0; border-radius: 50%;
